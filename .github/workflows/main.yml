@@ -1,0 +1,59 @@
+name: Build and create Release (Windows)
+
+on:
+  push:
+    tags:
+      - 'v*'  # Only on new version tags (v0.2)
+
+jobs:
+  build-windows:
+    name: Build and Package on Windows
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0  # Required for tags and branches in submodules
+
+      - name: Setup MSVC and Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Ensure CMake is installed
+        uses: jwlawson/actions-setup-cmake@v1
+        with:
+          cmake-version: '3.27.0'
+
+      - name: Configure CMake
+        run: >
+          cmake -S . -B build 
+          -DCMAKE_INSTALL_PREFIX=build 
+          -DCMAKE_BUILD_TYPE=Release 
+          -DCMAKE_SYSTEM_NAME="Windows"
+          -DCMAKE_SYSTEM_VERSION="10.0.19041.0"
+          -DHAVE_GAMEINPUT_H=0
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 6
+
+      - name: Install
+        run: cmake --install build --prefix bin
+
+      - name: Package with CPack
+        run: cpack --config build\\CPackConfig.cmake
+
+      - name: Find generated package
+        id: find_package
+        run: |
+          $file = Get-ChildItem -Path . -Recurse -Filter *.zip | Select-Object -First 1
+          echo "PACKAGE_PATH=$($file.FullName)" >> $env:GITHUB_ENV
+
+      - name: Create GitHub Release and upload ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: ${{ env.PACKAGE_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
