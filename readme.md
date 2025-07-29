@@ -8,27 +8,26 @@ visually disruptive.
 
 When the application is running, an overlay is placed over the entire  
 screen. The layer consists of diagonal lines, (animated) logos, and  
-message texts used as signatures. The logo file "logo.png" and the font  
-"font.ttf" must be located in the same directory as the main application.  
+message texts used as signatures.
 
 The logo and signature can be resized, rotated, and positioned via  
 drag & drop.
 
 The application has two states:  
 
-1. Layout mode
+1. Layout mode  
    Captures mouse gestures and lets you change the size and position  
    of logos and signatures, as well as their transparency using the  
-   mouse wheel.
+   mouse wheel.  
    (A green frame at the edges of the screen indicates you're in layout  
    mode.)
 
-2. Shielding mode
+2. Shielding mode  
    Passes mouse gestures to the underlying applications.  
    (Keyboard shortcuts remain functional if the application has focus.)
 
-You can toggle between the modes using the <space bar> or the <return>  
-key.
+You can toggle between the modes using the `space bar` or the  
+`return key`.
 
 On first launch, if no settings file exists, one signature and one logo  
 object will be created as examples. Upon quitting the application, a  
