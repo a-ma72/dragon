@@ -852,12 +852,18 @@ public:
 
 class AnimatedGif : public Image
 {
+    struct frame_info_t {
+        int delay_ms;
+        int transparent_color_index;
+        int disposal_mode;
+    };
+
 public:
     int frame_count;
     int current_frame;
+    int recent_disposal;
     Uint64 latest_ticks;
-    vector<int> frame_times;
-    vector<int> transparent_color_index;
+    vector<frame_info_t> frame_info;
     GifFileType *gif;
 
     AnimatedGif(
@@ -921,6 +927,7 @@ protected:
         latest_ticks = SDL_GetTicks() + dist(gen) % 500;
         frame_count = 0;
         current_frame = 0;
+        recent_disposal = DISPOSAL_UNSPECIFIED;
         this->alpha = (float)alpha / 255.0f;
 
         if (!renderer) return;
@@ -938,8 +945,11 @@ protected:
             frame_count = gif->ImageCount;
             for (int i = 0; i < frame_count; i++)
             {
-                int delay = 10;
-                int color_index = NO_TRANSPARENT_COLOR;
+                frame_info_t info {
+                    .delay_ms = 100,
+                    .transparent_color_index = NO_TRANSPARENT_COLOR,
+                    .disposal_mode = DISPOSAL_UNSPECIFIED
+                };
 
                 SavedImage *frame = &gif->SavedImages[i];
                 for (int j = 0; j < frame->ExtensionBlockCount; j++)
@@ -949,21 +959,25 @@ protected:
                     {
                         if (GIF_OK == DGifExtensionToGCB(ext->ByteCount, ext->Bytes, &gcb))
                         {
-                            delay = gcb.DelayTime;
-                            color_index = gcb.TransparentColor;
+                            info.delay_ms = gcb.DelayTime * 10;
+                            info.transparent_color_index = gcb.TransparentColor;
+                            info.disposal_mode = gcb.DisposalMode;
                             break;
                         }
                     }
                 }
 
-                frame_times.push_back(delay * 10);
-                transparent_color_index.push_back(color_index);
+                frame_info.push_back(info);
             }
 
-            surface = SDL_CreateSurface(gif->Image.Width, gif->Image.Height, SDL_PIXELFORMAT_RGBA8888);
+            surface = SDL_CreateSurface(gif->SWidth, gif->SHeight, SDL_PIXELFORMAT_RGBA8888);
+            if (surface)
+            {
+                SDL_ClearSurface(surface, 0, 0, 0, 0);
+            }
             render_frame(renderer);
-            extent.w = gif->Image.Width;
-            extent.h = gif->Image.Height;
+            extent.w = gif->SWidth;
+            extent.h = gif->SHeight;
             extent.x = extent.w / 2;
             extent.y = extent.h / 2;
         }
@@ -1004,35 +1018,68 @@ public:
 
     void render_frame(SDL_Renderer *renderer)
     {
-        uint32_t *addr, pixel;
         SavedImage *frame;
+        int left, top, width, height;
+        const ColorMapObject *color_map;
         const uint8_t *raster_bits;
+        int bg_color;
+        frame_info_t *frame_info = &this->frame_info[current_frame];
+        int transparent_color;
+        uint32_t *addr, pixel;
 
         if (!renderer || !surface || surface->format != SDL_PIXELFORMAT_RGBA8888 || !gif || !gif->SavedImages) return;
 
+		bg_color = gif->SBackGroundColor;
+		transparent_color = frame_info->transparent_color_index;
+
         frame = &gif->SavedImages[current_frame];
         raster_bits = frame->RasterBits;
+        if (!raster_bits) return;
+        color_map = frame->ImageDesc.ColorMap ? frame->ImageDesc.ColorMap : gif->SColorMap;
+        if (!color_map) return;
+
+        left = frame->ImageDesc.Left;
+        top = frame->ImageDesc.Top;
+        width = frame->ImageDesc.Width;
+        height = frame->ImageDesc.Height;
+
+        // Prepare canvas
+        switch (recent_disposal)
+        {
+            case DISPOSAL_UNSPECIFIED:
+            case DISPOSE_BACKGROUND:
+            {
+                if (bg_color == NO_TRANSPARENT_COLOR || bg_color < color_map->ColorCount)
+                {
+                    SDL_ClearSurface(surface, 0, 0, 0, 0);
+                }
+                else
+                {
+                    GifColorType *color = &color_map->Colors[bg_color];
+                    SDL_ClearSurface(surface, color->Red / 255.0f, color->Green / 255.0f, color->Blue / 255.0f, 1);
+                }
+                break;
+            }
+            case DISPOSE_DO_NOT:
+                break;
+        }
 
         // gif->frame is 8-bit indexed, so we have to convert to RGBA8888
-        SDL_ClearSurface(surface, 0, 0, 0, 0.0);
         SDL_LockSurface(surface);
-        for (int i = 0; i < gif->Image.Height; i++)
+        for (int i = 0; i < height; i++)
         {
-            addr = (uint32_t*)((uint8_t*)surface->pixels + i * surface->pitch);
-            for (int j = 0; j < gif->Image.Width; j++)
+            addr = (uint32_t*)((uint8_t*)surface->pixels + (i + top) * surface->pitch) + left;
+            for (int j = 0; j < width; j++)
             {
-                if (transparent_color_index[current_frame] == NO_TRANSPARENT_COLOR || *raster_bits != transparent_color_index[current_frame])
+                int color_index = *raster_bits++;
+
+                if (transparent_color == NO_TRANSPARENT_COLOR || transparent_color != color_index)
                 {
-                    ColorMapObject *color_map = frame->ImageDesc.ColorMap;
                     GifColorType *color;
 
-                    if (!color_map)
+                    if (color_index < color_map->ColorCount)
                     {
-                        color_map = gif->SColorMap;
-                    }
-                    if (color_map && color_map->Colors && *raster_bits < color_map->ColorCount)
-                    {
-                        color = &color_map->Colors[*raster_bits];
+                        color = &color_map->Colors[color_index];
                         pixel = SDL_MapSurfaceRGB(
                                 surface,
                                 color->Red,
@@ -1042,13 +1089,14 @@ public:
                     }
                 }
                 addr++;
-                raster_bits++;
             }
         }
         SDL_UnlockSurface(surface);
 
         SDL_DestroyTexture(texture);
         texture = SDL_CreateTextureFromSurface(renderer, surface);
+
+        recent_disposal = frame_info->disposal_mode;
     }
 
 };
@@ -1277,10 +1325,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     {
         for (auto &obj: app->screen_objects)
         {
-            if (string(obj->type_name()) == "AnimatedGif")
+            auto* gif = dynamic_cast<AnimatedGif *>(obj);
+
+            if (gif)
             {
-                auto gif = (AnimatedGif *) obj;
-                Uint64 next_frame_ticks = gif->latest_ticks + gif->frame_times[gif->current_frame];
+                Uint64 next_frame_ticks = gif->latest_ticks + gif->frame_info[gif->current_frame].delay_ms;
                 if (next_frame_ticks < ticks)
                 {
                     gif->current_frame = (gif->current_frame + 1) % gif->frame_count;
