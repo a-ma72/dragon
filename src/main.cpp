@@ -741,8 +741,6 @@ public:
                     scale *= dScale;
                     pos.x += (float) ((pos.x - pt.x) * (dScale - 1.0));
                     pos.y += (float) ((pos.y - pt.y) * (dScale - 1.0));
-                    needs_update = UPDATE_SETTINGS_CHANGED;
-                    return true;
                 }
                 else
                 {
@@ -755,9 +753,9 @@ public:
                     {
                         alpha = min(1.0f, alpha + (5.0f / 255.0f));
                     }
-                    needs_update = UPDATE_SETTINGS_CHANGED;
-                    return true;
                 }
+                needs_update = UPDATE_SETTINGS_CHANGED;
+                return true;
             }
         }
 
@@ -856,9 +854,12 @@ class AnimatedGif : public Image
         int delay_ms;
         int transparent_color_index;
         int disposal_mode;
+        bool texture_outdated;
+        SDL_Texture *texture;
     };
 
 public:
+    bool cache_frames;
     int frame_count;
     int current_frame;
     int recent_disposal;
@@ -874,12 +875,13 @@ public:
             float rotate_by,
             bool flip_horizontal,
             int alpha,
+            bool cache_frames,
             SDL_Renderer *renderer)
     : Image(x, y),
       gif((GifFileType*)nullptr)
     {
         full_path = (base_path / name).string();
-        init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha, renderer);
+        init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha, cache_frames, renderer);
     }
 
     AnimatedGif(json &j, SDL_Renderer *renderer)
@@ -894,13 +896,16 @@ public:
                 j.value("rotate", 0.0f),
                 j.value("flip_horizontal", false),
                 j.value("alpha", 255),
+                j.value("cache_frames", true),
                 renderer);
     }
 
     [[nodiscard]]
     const char* type_name() const override {return "AnimatedGif";}
 
-    ~AnimatedGif() override {
+    ~AnimatedGif() override
+    {
+        invalidate(true);
         SDL_DestroyTexture(texture);
         SDL_DestroySurface(surface);
         if (gif) DGifCloseFile(gif, nullptr);
@@ -915,6 +920,7 @@ protected:
             float rotate_by,
             bool flip_horizontal,
             int alpha,
+            bool cache_frames,
             SDL_Renderer *renderer)
     {
         this->name = name;
@@ -929,16 +935,17 @@ protected:
         current_frame = 0;
         recent_disposal = DISPOSAL_UNSPECIFIED;
         this->alpha = (float)alpha / 255.0f;
+        this->cache_frames = cache_frames;
 
         if (!renderer) return;
 
         gif = DGifOpenFileName(full_path.c_str(), nullptr);
         if (!gif)
-		{
-			SDL_Log("Error loading \"%s\":\n   %s", name.c_str(), SDL_GetError());
-		}
-		else
-		{
+        {
+            SDL_Log("Error loading \"%s\":\n   %s", name.c_str(), SDL_GetError());
+        }
+        else
+        {
             GraphicsControlBlock gcb;
 
             DGifSlurp(gif);
@@ -948,7 +955,9 @@ protected:
                 frame_info_t info {
                     .delay_ms = 100,
                     .transparent_color_index = NO_TRANSPARENT_COLOR,
-                    .disposal_mode = DISPOSAL_UNSPECIFIED
+                    .disposal_mode = DISPOSAL_UNSPECIFIED,
+                    .texture_outdated = true,
+                    .texture = (SDL_Texture *)nullptr
                 };
 
                 SavedImage *frame = &gif->SavedImages[i];
@@ -996,8 +1005,21 @@ public:
              {"rotate", rotate},
              {"flip_horizontal", flip_horizontal},
              {"alpha", (int)(alpha * 255.0f)},
+             {"cache_frames", cache_frames},
              {"type", type_name()}
         });
+    }
+
+    bool handle_event(const SDL_Event* event, int &needs_update, AppContext *app) override
+    {
+        bool result = Image::handle_event(event, needs_update, app);
+
+        if (needs_update == UPDATE_SETTINGS_CHANGED)
+        {
+            invalidate();
+        }
+
+        return result;
     }
 
     void draw(const SDL_FPoint &pt, int alpha, SDL_Renderer *renderer) const override
@@ -1027,23 +1049,26 @@ public:
         int transparent_color;
         uint32_t *addr, pixel;
 
-        if (!renderer || !surface || surface->format != SDL_PIXELFORMAT_RGBA8888 || !gif || !gif->SavedImages) return;
+        if (!renderer) return;
 
-		bg_color = gif->SBackGroundColor;
-		transparent_color = frame_info->transparent_color_index;
+        if (!frame_info->texture_outdated)
+        {
+            texture = frame_info->texture;
+            recent_disposal = frame_info->disposal_mode;
+            return;
+        }
 
+        if (!surface || surface->format != SDL_PIXELFORMAT_RGBA8888) return;
+
+        // Prepare canvas
+        if (!gif || !gif->SavedImages) return;
         frame = &gif->SavedImages[current_frame];
+        bg_color = gif->SBackGroundColor;
         raster_bits = frame->RasterBits;
         if (!raster_bits) return;
         color_map = frame->ImageDesc.ColorMap ? frame->ImageDesc.ColorMap : gif->SColorMap;
         if (!color_map) return;
 
-        left = frame->ImageDesc.Left;
-        top = frame->ImageDesc.Top;
-        width = frame->ImageDesc.Width;
-        height = frame->ImageDesc.Height;
-
-        // Prepare canvas
         switch (recent_disposal)
         {
             case DISPOSAL_UNSPECIFIED:
@@ -1065,6 +1090,13 @@ public:
         }
 
         // gif->frame is 8-bit indexed, so we have to convert to RGBA8888
+        left = frame->ImageDesc.Left;
+        top = frame->ImageDesc.Top;
+        width = frame->ImageDesc.Width;
+        height = frame->ImageDesc.Height;
+
+        transparent_color = frame_info->transparent_color_index;
+
         SDL_LockSurface(surface);
         for (int i = 0; i < height; i++)
         {
@@ -1093,10 +1125,37 @@ public:
         }
         SDL_UnlockSurface(surface);
 
-        SDL_DestroyTexture(texture);
+        if (frame_info->texture)
+        {
+            SDL_DestroyTexture(frame_info->texture);
+            frame_info->texture = (SDL_Texture *)nullptr;
+            frame_info->texture_outdated = true;
+        }
         texture = SDL_CreateTextureFromSurface(renderer, surface);
+        if (cache_frames)
+        {
+            frame_info->texture = texture;
+            frame_info->texture_outdated = false;
+        }
 
         recent_disposal = frame_info->disposal_mode;
+    }
+
+    void invalidate(bool remove = false)
+    {
+        for (auto info : frame_info)
+        {
+            info.texture_outdated = true;
+            if (remove)
+            {
+                SDL_DestroyTexture(info.texture);
+                if (texture == info.texture)
+                {
+                    texture = (SDL_Texture *)nullptr;
+                }
+                info.texture = (SDL_Texture *)nullptr;
+            }
+        }
     }
 
 };
@@ -1340,6 +1399,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                 else
                 {
                     timeout = min(timeout, (int) (next_frame_ticks - ticks));
+                    // SDL_Log("next frame in %i ms", (int) (timeout));
                 }
             }
         }
@@ -1580,12 +1640,12 @@ void update_screen_metrics(AppContext* app)
         APPBARDATA abd = {0};
         abd.cbSize = sizeof(APPBARDATA);
         if (SHAppBarMessage(ABM_GETTASKBARPOS, &abd)) 
-		{
+        {
             RECT rc = abd.rc;
             int height = 0;
 
             if (abd.uEdge == ABE_BOTTOM || abd.uEdge == ABE_TOP) 
-			{
+            {
                 height = rc.bottom - rc.top;
             }
             app->crop_bottom = height;
