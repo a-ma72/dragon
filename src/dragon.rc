@@ -1,0 +1,26 @@
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    0,1,0,0
+PRODUCTVERSION 0,1,0,0
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "0409FDE9"  // English (U.S.) - UTF-8
+        {
+            VALUE "CompanyName",        "None"
+            VALUE "FileDescription",    "Dragon Screen Protector\0"
+            VALUE "FileVersion",        "0.1.0.0\0"
+            VALUE "LegalCopyright",     "(C) 2025 A. Martin\0"
+            VALUE "OriginalFilename",   "dragon.exe\0"
+            VALUE "ProductName",        "Dragon\0"
+            VALUE "ProductVersion",     "0.1.0.0\0"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x0409, 65001
+    }
+}
+
+1000 ICON "dragon.ico"
