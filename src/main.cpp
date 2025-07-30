@@ -69,6 +69,7 @@ struct AppContext {
     SDL_Renderer *renderer = nullptr;
     SDL_AppResult app_quit = SDL_APP_CONTINUE;
     SDL_Cursor *handCursor = nullptr;
+    Uint64 idle_ticks = 0;
 
     HWND hwnd = nullptr;
     SDL_Rect screen_rect_init = {-1, -1, -1, -1};  // To initialize `screen_rect` (editable in settimgs file)
@@ -82,7 +83,6 @@ struct AppContext {
     bool layout_mode = false;
     bool is_virgin = true;
     int idle_delay_ms = 600;
-    int gif_delay_ms = 100;
     bool needs_redraw = true;
 
     // Mouse capturing and dragging (screen objects)
@@ -1380,6 +1380,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         app->needs_redraw = false;
     }
 
+    if (ticks >= app->idle_ticks + app->idle_delay_ms)
+    {
+        app->idle_ticks = ticks;
+    }
+
     if (app->have_animations)
     {
         for (auto &obj: app->screen_objects)
@@ -1833,6 +1838,8 @@ void draw_lines(AppContext* app)
         app->alpha
     );
 
+    gen.seed(app->idle_ticks);
+
     for (int i = 0; i < width + height; i += 10)
     {
         POINT pt[2];
@@ -2028,7 +2035,6 @@ void settings_write(AppContext* app)
         {"hidden", app->hidden},
         {"alpha", app->alpha},
         {"idle_delay_ms", app->idle_delay_ms},
-        {"gif_delay_ms", app->gif_delay_ms},
         {"line_width", app->line_width},
         {"line_color", int_to_hex_color(app->line_color)},
         {"line_dashed", app->line_dashed},
@@ -2130,7 +2136,6 @@ bool settings_read(AppContext* app, json &objects)
                 app->alpha = j.value("alpha", app->alpha);
                 app->hidden = j.value("hidden", false);
                 app->idle_delay_ms = j.value("idle_delay_ms", app->idle_delay_ms);
-                app->gif_delay_ms = j.value("gif_delay_ms", app->gif_delay_ms);
                 app->line_color = get_color_value(j, "line_color", app->line_color);
                 app->line_dashed = j.value("line_dashed", app->line_dashed);
                 app->line_dashed_gap = j.value("line_dashed_gap", app->line_dashed_gap);
