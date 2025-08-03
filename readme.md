@@ -1,4 +1,4 @@
-Screen Dragon v0.2 (inspired by "ScreenDragons", 2020 Brian Shepherd)
+Screen Dragon (inspired by "ScreenDragons", 2020 Brian Shepherd)
 ===========================================================================
 
 ![Main App](app.png)
