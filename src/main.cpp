@@ -2043,9 +2043,9 @@ void draw_lines(AppContext* app)
 
     pixel = SDL_MapSurfaceRGBA(
                 surface,
-                GetBValue(app->line_color),
-                GetGValue(app->line_color),
                 GetRValue(app->line_color),
+                GetGValue(app->line_color),
+                GetBValue(app->line_color),
                 app->alpha);
 
     if (slope_dy < 0)
@@ -2206,7 +2206,7 @@ bool color_from_key(int key, COLORREF &color)
         };
 
         color = color_map[strchr(color_keys, key) - color_keys];
-        color = RGB(GetBValue(color), GetGValue(color), GetRValue(color));  // (SDL sort order)
+        color = RGB(GetRValue(color), GetGValue(color), GetBValue(color));  // (SDL sort order)
         return true;
     }
     return false;
