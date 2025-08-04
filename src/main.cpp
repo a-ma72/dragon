@@ -23,6 +23,7 @@
 #include "gif_lib.h"
 
 extern "C" const char *version = "0.3";
+extern "C" const char *signature = "Dragon Signature";
 
 using std::string;
 using std::vector;
@@ -98,8 +99,8 @@ struct AppContext {
     int line_slope_dy = 10;
 
     // Text (initial) properties
-    string text_file_name = "signature.txt";  // Not used
-    string text_content = "Dragon Signature";
+    string text_file_name = "signature.txt";
+    string text_content = "";
     string text_font_name = "Freeman-Regular.TTF";
     int text_font_size = 78;
     COLORREF text_font_color = RGB(112, 146, 190);
@@ -2306,7 +2307,7 @@ void settings_write(AppContext* app)
         {"line_dashed_gap", app->line_dashed_gap},
         {"line_slope_dx", app->line_slope_dx},
         {"line_slope_dy", app->line_slope_dy},
-        // {"text_file_name", app->text_file_name},
+        {"text_file_name", app->text_file_name},
         {"text_content", app->text_content},
         {"text_font_name", app->text_font_name},
         {"text_font_color", int_to_hex_color(app->text_font_color)},
@@ -2413,7 +2414,7 @@ bool settings_read(AppContext* app, json &objects)
                 app->logo_scale = j.value("logo_scale", app->logo_scale);
                 app->logo_alpha = j.value("logo_alpha", app->logo_alpha);
                 app->text_content = j.value("text_content", app->text_content);
-                //app->text_file_name = j["text_file_name"];
+                app->text_file_name = j["text_file_name"];
                 app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
                 app->text_font_name = j.value("text_font_name", app->text_font_name);
                 app->text_font_size = j.value("text_font_size", app->text_font_size);
@@ -2434,5 +2435,23 @@ bool settings_read(AppContext* app, json &objects)
 
         SDL_Log("Settings read.");
     }
+
+    if (app->text_content.empty())
+    {
+        app->text_content = signature;
+
+        if (!app->text_file_name.empty())
+        {
+            auto signature_path = app->base_path / app->text_file_name;
+            std::ifstream text_file(signature_path);
+            std::string text_content;
+
+            if (text_file.good() && std::getline(text_file, text_content))
+            {
+                app->text_content = text_content;
+            }
+        }
+    }
+
     return true;
 }
