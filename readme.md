@@ -31,8 +31,8 @@ Upon quitting the application, a settings file is saved in the program directory
 The settings file contains all configuration values in JSON format and can also be edited manually.  
 
 Placeable objects (signatures and logos) can be freely added to the "objects" list in the settings file. 
-Supported logo image formats are SVG, PNG, BMP, JPG, and GIF. For GIFs, only the first frame is shown by default. 
-To enable animation, set the object's "type" in the settings file from "Image" to "AnimatedGif".  
+Supported logo image formats are SVG, PNG, BMP, JPG, Webp, TIF, and GIF. For GIFs, only the first frame is 
+shown by default. To enable animation, set the object's "type" in the settings file from "Image" to "AnimatedGif".  
 The `image_full_path` refers to the fully resolved location of the image, or relative to the current path from 
 where the program was started. Missing parameters are filled with standard values, if possible.
 

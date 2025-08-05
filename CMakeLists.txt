@@ -11,9 +11,14 @@ cmake_minimum_required(VERSION 3.10)
 project(dragon VERSION 0.3)
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_VERBOSE_MAKEFILE ON)
 
 
 set(BUILD_SHARED_LIBS OFF)
+
+set(SDL_EVENTS ON)
+set(SDL_RENDER ON)
+set(SDL_VIDEO ON)
 
 set(SDL_AUDIO OFF)
 set(SDL_CAMERA OFF)
@@ -22,14 +27,23 @@ set(SDL_DISKAUDIO OFF)
 set(SDL_DUMMYAUDIO OFF)
 set(SDL_DUMMYCAMERA OFF)
 set(SDL_DUMMYVIDEO OFF)
+set(SDL_EXAMPLES OFF)
+set(SDL_FILESYSTEM OFF)
+set(SDL_GAMEPAD OFF)
 set(SDL_HAPTIC OFF)
 set(SDL_HIDAPI OFF)
+set(SDL_INSTALL_TESTS OFF)
 set(SDL_JOYSTICK OFF)
-set(SDL_JOYSTICK_GAMEINPUT OFF)
+set(SDL_LOADSO OFF)
+set(SDL_LOCALE OFF)
+set(SDL_MISC OFF)
 set(SDL_POWER OFF)
 set(SDL_SENSOR OFF)
+set(SDL_TEST OFF)
 set(SDL_TEST_LIBRARY OFF)
+set(SDL_THREADS OFF)
 set(SDL_VULKAN OFF)
+set(SDL_XINPUT OFF)
 
 set(SDLIMAGE_AVIF OFF)
 set(SDLIMAGE_XCF OFF)
@@ -59,6 +73,11 @@ target_link_libraries(dragon
         SDL3_ttf::SDL3_ttf
         giflib
         json
+)
+target_link_options(dragon PRIVATE
+        /VERBOSE:LIB /MAP /MAPINFO:EXPORTS
+        /GL /LTCG
+        /O1
 )
 
 install(TARGETS dragon DESTINATION .)
