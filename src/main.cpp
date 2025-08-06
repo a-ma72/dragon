@@ -42,21 +42,28 @@ struct AppContext;
 class ScreenObject;
 class Signature;
 class Image;
+
 void update_screen_metrics(AppContext* app);
 void update_layout_mode(AppContext* app);
 void init_screen_objects(AppContext* app, json &objects);
 void free_screen_objects(AppContext* app);
+void draw_line_bresenham(int x1, int y1, int dx, int dy, int dash_len, int gap_len, void *color, SDL_Surface* surface);
 void draw_lines(AppContext *app);
 void draw(AppContext* app);
 bool color_from_key(int key, COLORREF &color);
 string int_to_hex_color(COLORREF color);
 COLORREF get_color_value(const json& j, const string& key, COLORREF default_value);
 COLORREF hex_color_to_int(const string& hex);
-void settings_write(AppContext* app);
-bool settings_read(AppContext* app, json &objects);
 bool screen_objects_add_text(float x, float y, const char* text, AppContext *app);
 bool screen_objects_add_image(float x, float y, const char *full_path_name, AppContext *app);
 void clipboard_insert(AppContext *app);
+double round_to_precision(double value, int precision);
+void settings_write(AppContext* app);
+bool settings_read_v0_2(AppContext* app, json &j, json &objects);
+bool settings_read_v0_3(AppContext* app, json &j, json &objects);
+bool settings_read(AppContext* app, json &objects);
+SDL_AppResult app_init_failed();
+
 
 #define UPDATE_VIEW_CHANGED 1
 #define UPDATE_SETTINGS_CHANGED 2
@@ -137,12 +144,20 @@ public:
     virtual ~ScreenObject() = default;
     [[nodiscard]] virtual const char* type_name() const = 0;
     [[nodiscard]] virtual json to_json() const = 0;
-    [[nodiscard]]
-    virtual bool valid() const = 0;
-    [[nodiscard]]
-    virtual bool hit_test(SDL_FPoint pt) const {return false;}
+    [[nodiscard]] virtual bool valid() const = 0;
+    [[nodiscard]] virtual bool hit_test(SDL_FPoint pt) const {return false;}
     virtual bool handle_event(const SDL_Event* event, int &needs_update, AppContext *app) = 0;
     virtual void draw(const SDL_FPoint &pt, int alpha, SDL_Renderer *renderer) const = 0;
+
+    [[nodiscard]]
+    virtual bool hit_test_at_cursor() const
+    {
+        SDL_FPoint pt;
+
+        SDL_GetGlobalMouseState(&pt.x, &pt.y);
+
+        return hit_test(pt);
+    }
 
     static void rotate_point(SDL_FPoint ct, SDL_FPoint* pt, double phi_deg)
     {
@@ -258,7 +273,9 @@ public:
       texture(nullptr),
       surface(nullptr)
     {
-        init(
+        try
+        {
+            init(
                 j.value("text", "Example"),
                 j["x"], j["y"],
                 j.value("font_name", "Freeman-Regular.TTF"),
@@ -269,6 +286,11 @@ public:
                 j.value("rotate", 0.0f),
                 j.value("alpha", 255),
                 renderer);
+        }
+        catch (const std::exception &e)
+        {
+            SDL_Log("Error creating signature: %s", e.what());
+        }
     }
 
     [[nodiscard]]
@@ -360,14 +382,14 @@ public:
         if (!valid()) return json::object();
 
         return json( {
-             {"x", pos.x},
-             {"y", pos.y},
+             {"x", (int)pos.x},
+             {"y", (int)pos.y},
              {"text", text},
-             {"scale", scale},
-             {"rotate", rotate},
+             {"scale", round_to_precision(scale, 4)},
+             {"rotate", round_to_precision(rotate, 4)},
              {"alpha", (int)(alpha * 255.0f)},
              {"font_name", font_name},
-             {"font_size", font_size},
+             {"font_size", round_to_precision(font_size, 1)},
              {"font_color", int_to_hex_color(font_color)},
              {"type", type_name()}
         } );
@@ -501,11 +523,7 @@ public:
 
             if (color_from_key((int) event->key.key, color))
             {
-                SDL_FPoint pt;
-
-                SDL_GetGlobalMouseState(&pt.x, &pt.y);
-
-                if (hit_test(pt))
+                if (hit_test_at_cursor())
                 {
                     change_color((int) color, app->renderer);
                     needs_update = UPDATE_SETTINGS_CHANGED;
@@ -514,11 +532,7 @@ public:
             }
             else if (event->key.key == SDLK_DELETE)
             {
-                SDL_FPoint pt;
-
-                SDL_GetGlobalMouseState(&pt.x, &pt.y);
-
-                if (hit_test(pt))
+                if (hit_test_at_cursor())
                 {
                     deleted = true;
                     needs_update = UPDATE_SETTINGS_CHANGED;
@@ -611,15 +625,22 @@ public:
     Image(json &j, SDL_Renderer *renderer)
     : ScreenObject(-1, -1)
     {
-        init(
-            j["x"], j["y"],
-            j.value("image_name", ""),
-            j["image_full_path"],
-            j.value("scale", 1.0f),
-            j.value("rotate", 0.0f),
-            j.value("flip_horizontal", false),
-            j.value("alpha", 255),
-            renderer);
+        try
+        {
+            init(
+                j["x"], j["y"],
+                j.value("image_name", ""),
+                j.value("image_full_path", ""),
+                j.value("scale", 1.0f),
+                j.value("rotate", 0.0f),
+                j.value("flip_horizontal", false),
+                j.value("alpha", 255),
+                renderer);
+        }
+        catch (const std::exception &e)
+        {
+            SDL_Log("Error creating image: %s", e.what());
+        }
     }
 
     [[nodiscard]]
@@ -694,13 +715,13 @@ public:
         if (!valid()) return json::object();
 
         return json( {
-             {"x", pos.x},
-             {"y", pos.y},
+             {"x", (int)pos.x},
+             {"y", (int)pos.y},
              {"image_name", name},
              {"image_full_path", full_path},
-             {"scale", scale},
-             {"rotate", scale},
-             {"flip_horizontal", flip_horizontal},
+             {"scale", round_to_precision(scale, 4)},
+             {"rotate", round_to_precision(rotate, 4)},
+             {"flip_horizontal", (bool)flip_horizontal},
              {"alpha", (int)(alpha * 255.0f)},
              {"type", type_name()}
         });
@@ -842,11 +863,7 @@ public:
         {
             if (event->key.key == SDLK_F)
             {
-                SDL_FPoint pt;
-
-                SDL_GetGlobalMouseState(&pt.x, &pt.y);
-
-                if (hit_test(pt))
+                if (hit_test_at_cursor())
                 {
                     flip_horizontal = !flip_horizontal;
                     needs_update = UPDATE_SETTINGS_CHANGED;
@@ -855,11 +872,7 @@ public:
             }
             else if (event->key.key == SDLK_DELETE)
             {
-                SDL_FPoint pt;
-
-                SDL_GetGlobalMouseState(&pt.x, &pt.y);
-
-                if (hit_test(pt))
+                if (hit_test_at_cursor())
                 {
                     deleted = true;
                     needs_update = UPDATE_SETTINGS_CHANGED;
@@ -932,16 +945,23 @@ public:
     : Image(-1, -1),
       gif((GifFileType*)nullptr)
     {
-        init(
+        try
+        {
+            init(
                 j["x"], j["y"],
                 j.value("image_name", ""),
-                j["image_full_path"],
+                j.value("image_full_path", ""),
                 j.value("scale", 1.0f),
                 j.value("rotate", 0.0f),
                 j.value("flip_horizontal", false),
                 j.value("alpha", 255),
                 j.value("cache_frames", true),
                 renderer);
+        }
+        catch (const std::exception &e)
+        {
+            SDL_Log("Error creating image: %s", e.what());
+        }
     }
 
     [[nodiscard]]
@@ -1043,15 +1063,15 @@ public:
         if (!valid()) return json::object();
 
         return json( {
-             {"x", pos.x},
-             {"y", pos.y},
+             {"x", (int)pos.x},
+             {"y", (int)pos.y},
              {"image_name", name},
              {"image_full_path", full_path},
-             {"scale", scale},
-             {"rotate", rotate},
-             {"flip_horizontal", flip_horizontal},
+             {"scale", round_to_precision(scale, 4)},
+             {"rotate", round_to_precision(rotate, 4)},
+             {"flip_horizontal", (bool)flip_horizontal},
              {"alpha", (int)(alpha * 255.0f)},
-             {"cache_frames", cache_frames},
+             {"cache_frames", (bool)cache_frames},
              {"type", type_name()}
         });
     }
@@ -1159,7 +1179,7 @@ public:
         SDL_LockSurface(surface);
         for (int i = 0; i < height; i++)
         {
-            addr = (Uint32*)((Uint8*)surface->pixels + (i + top) * surface->pitch) + left;
+            addr = (Uint32*)(void*)((Uint8*)surface->pixels + (i + top) * surface->pitch) + left;
             for (int j = 0; j < width; j++)
             {
                 int color_index = *raster_bits++;
@@ -1220,7 +1240,7 @@ public:
 };
 
 
-SDL_AppResult SDL_Fail()
+SDL_AppResult app_init_failed()
 {
     SDL_LogError(
         SDL_LOG_CATEGORY_CUSTOM,
@@ -1245,32 +1265,32 @@ SDL_AppResult SDL_AppInit(
     app->base_path = SDL_GetBasePath();
     if (app->base_path.empty())
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
 
     // Init SDL
     if (!SDL_Init(SDL_INIT_VIDEO))
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
 
     // Init TTF
     if (!TTF_Init())
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
 
     // Create hand cursor
     app->handCursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
     if (!app->handCursor)
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
 
     // Read settings
     if (!settings_read(app, objects))
     {
-        return SDL_APP_FAILURE;
+        return app_init_failed();
     }
 
     // Update screen metrics
@@ -1293,7 +1313,7 @@ SDL_AppResult SDL_AppInit(
 
     if (!app->window)
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
     SDL_SetWindowPosition(app->window, app->work_area.x, app->work_area.y);
 
@@ -1301,14 +1321,14 @@ SDL_AppResult SDL_AppInit(
     SDL_PropertiesID props = SDL_GetWindowProperties(app->window);
     if (!props)
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
     else
     {
         app->hwnd = (HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
         if (!app->hwnd)
         {
-            return SDL_Fail();
+            return app_init_failed();
         }
         else
         {
@@ -1321,7 +1341,7 @@ SDL_AppResult SDL_AppInit(
     app->renderer = SDL_CreateRenderer(app->window, nullptr);
     if (!app->renderer)
     {
-        return SDL_Fail();
+        return app_init_failed();
     }
 
     // Initialize screen objects
@@ -1364,7 +1384,7 @@ SDL_AppResult SDL_AppInit(
 
         if (!text->valid() || !image->valid())
         {
-            return SDL_Fail();
+            return app_init_failed();
         }
     }
 
@@ -1429,7 +1449,7 @@ void SDL_AppQuit(void* appstate, [[maybe_unused]] SDL_AppResult result)
 SDL_AppResult SDL_AppIterate(void *appstate)
 {
     auto* app = (AppContext*)appstate;
-    int timeout = app->idle_delay_ms;
+    int timeout = -1;
     Uint64 ticks = SDL_GetTicks();
 
     if (app->app_quit != SDL_APP_CONTINUE) return app->app_quit;
@@ -1440,10 +1460,22 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         app->needs_redraw = false;
     }
 
-    if (ticks >= app->idle_ticks + app->idle_delay_ms)
+    if (app->line_width > 0 && app->line_dashed && app->line_dashed_gap > 0 && !app->hidden)
     {
-        app->idle_ticks = ticks;
+        Uint64 threshold = app->idle_ticks + app->idle_delay_ms;
+
+        if (ticks >= threshold)
+        {
+            timeout = 0;
+            app->idle_ticks = ticks;
+            app->needs_redraw = true;
+        }
+        else
+        {
+            timeout = (int)(threshold - ticks);
+        }
     }
+
 
     if (app->have_animations)
     {
@@ -1451,10 +1483,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         {
             auto* gif = dynamic_cast<AnimatedGif *>(obj);
 
-            if (gif)
+            if (gif && gif->valid())
             {
                 Uint64 next_frame_ticks = gif->latest_ticks + gif->frame_info[gif->current_frame].delay_ms;
-                if (next_frame_ticks < ticks)
+                if (ticks > next_frame_ticks)
                 {
                     gif->current_frame = (gif->current_frame + 1) % gif->frame_count;
                     gif->render_frame(app->renderer);
@@ -1463,22 +1495,18 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                 }
                 else
                 {
-                    timeout = SDL_min(timeout, (int) (next_frame_ticks - ticks));
+                    timeout = SDL_min((timeout < 0) ? app->idle_delay_ms : timeout, (int) (next_frame_ticks - ticks));
                     // SDL_Log("next frame in %i ms", (int) (timeout));
                 }
             }
         }
-
-        if (!app->needs_redraw)
-        {
-            // Wait for next event with timeout
-            SDL_WaitEventTimeout(nullptr, timeout);
-        }
     }
-    else
+
+    if (!app->needs_redraw)
     {
-        // Wait until next event occurs
-        SDL_WaitEvent(nullptr);
+        // Wait for next event with timeout (timeout==-1 means "no timeout")
+        SDL_WaitEventTimeout(nullptr, timeout);
+        // SDL_Log("timeout: %i", timeout);
     }
 
     return app->app_quit;
@@ -1780,7 +1808,10 @@ void init_screen_objects(AppContext* app, json &objects) {
                 app->is_virgin = false;
             }
         }
-        if (object.contains("type")) {
+        if (object.contains("type"))
+        {
+            ScreenObject* obj = nullptr;
+
             if (!object.contains("x") || object["x"] < 0)
             {
                 object["x"] = app->center_x;
@@ -1789,25 +1820,29 @@ void init_screen_objects(AppContext* app, json &objects) {
             {
                 object["y"] = app->center_y;
             }
-            if (object["type"] == "Signature") {
-                app->screen_objects.push_back(
-                        new Signature(
-                                object,
-                                app->base_path,
-                                app->renderer));
-            } else if (object["type"] == "Image") {
-                app->screen_objects.push_back(
-                        new Image(
-                                object,
-                                app->renderer));
-            } else if (object["type"] == "AnimatedGif") {
-                app->screen_objects.push_back(
-                        new AnimatedGif(
-                                object,
-                                app->renderer));
+            if (object["type"] == "Signature")
+            {
+                 obj = new Signature(
+                         object,
+                         app->base_path,
+                         app->renderer);
+            }
+            else if (object["type"] == "Image")
+            {
+                obj = new Image(
+                        object,
+                        app->renderer);
+            }
+            else if (object["type"] == "AnimatedGif")
+            {
+                obj = new AnimatedGif(
+                        object,
+                        app->renderer);
                 app->have_animations = true;
             }
             // (Silently ignore unknown object types)
+
+            if (obj) app->screen_objects.push_back(obj);
         }
     }
 }
@@ -1947,6 +1982,14 @@ void clipboard_insert(AppContext *app)
 }
 
 
+double round_to_precision(double value, int decimals)
+{
+    double factor = std::pow(10.0, decimals);
+
+    return std::round(value * factor) / factor;
+}
+
+
 void free_screen_objects(AppContext* app)
 {
     for (auto & screen_object : app->screen_objects)
@@ -2019,9 +2062,6 @@ void draw_line_bresenham(
 
 void draw_lines(AppContext* app)
 {
-    const int MAXLINES = 10000;
-    int left = app->work_area.x;
-    int top = app->work_area.y;
     int width = app->work_area.w;
     int height = app->work_area.h;
     int dash_len = app->line_dashed_len;
@@ -2033,7 +2073,6 @@ void draw_lines(AppContext* app)
     SDL_Point extent;
     SDL_Surface *surface;
     SDL_Texture *texture;
-    int n = MAXLINES;
     int negative_slope = false;
     int jitter = 0;
 
@@ -2296,28 +2335,28 @@ void settings_write(AppContext* app)
             app->screen_rect_init.w, app->screen_rect_init.h
             }
         },
-        {"crop_bottom", app->crop_bottom},
-        {"hidden", app->hidden},
-        {"alpha", app->alpha},
-        {"idle_delay_ms", app->idle_delay_ms},
-        {"line_width", app->line_width},
+        {"crop_bottom", (int)app->crop_bottom},
+        {"hidden", (bool)app->hidden},
+        {"alpha", (int)app->alpha},
+        {"idle_delay_ms", (int)app->idle_delay_ms},
+        {"line_width", (int)app->line_width},
         {"line_color", int_to_hex_color(app->line_color)},
-        {"line_dashed", app->line_dashed},
-        {"line_dashed_len", app->line_dashed_len},
-        {"line_dashed_gap", app->line_dashed_gap},
-        {"line_slope_dx", app->line_slope_dx},
-        {"line_slope_dy", app->line_slope_dy},
+        {"line_dashed", (bool)app->line_dashed},
+        {"line_dashed_len", (int)app->line_dashed_len},
+        {"line_dashed_gap", (int)app->line_dashed_gap},
+        {"line_slope_dx", (int)app->line_slope_dx},
+        {"line_slope_dy", (int)app->line_slope_dy},
         {"text_file_name", app->text_file_name},
         {"text_content", app->text_content},
         {"text_font_name", app->text_font_name},
         {"text_font_color", int_to_hex_color(app->text_font_color)},
-        {"text_font_size", app->text_font_size},
-        {"text_scale", app->text_scale},
-        {"text_rotate", app->text_rotate},
-        {"text_alpha", app->text_alpha},
+        {"text_font_size", round_to_precision(app->text_font_size, 1)},
+        {"text_scale", round_to_precision(app->text_scale, 4)},
+        {"text_rotate", round_to_precision(app->text_rotate, 4)},
+        {"text_alpha", (int)app->text_alpha},
         {"logo_file_name", app->logo_file_name},
-        {"logo_scale", app->logo_scale},
-        {"logo_alpha", app->logo_alpha},
+        {"logo_scale", round_to_precision(app->logo_scale, 4)},
+        {"logo_alpha", (int)app->logo_alpha},
     };
 
     json objects = json::array();
@@ -2348,6 +2387,104 @@ void settings_write(AppContext* app)
 }
 
 
+bool settings_read_v0_2(AppContext* app, json &j, json &objects)
+{
+    app->crop_bottom = j.value("task_bar_height", app->crop_bottom);
+    app->alpha = j.value("alpha", app->alpha);
+    app->hidden = (bool)j.value("hidden", 0);
+    app->line_width = j.value("line_width", app->line_width);
+    app->line_color = get_color_value(j, "line_color", app->line_color);
+    app->line_dashed = j.value("line_dashed", app->line_dashed);
+    app->line_dashed_gap = j.value("line_dashed_gap", app->line_dashed_gap);
+    app->line_dashed_len = j.value("line_dashed_len", app->line_dashed_len);
+    app->logo_file_name = j.value("logo_filename", app->logo_file_name);
+    app->logo_scale = j.value("logo_scale", app->logo_scale);
+    app->text_content = j.value("text_content", app->text_content);
+    app->text_file_name = j["text_file_name"];
+    app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
+    app->text_font_name = j.value("text_font_name", app->text_font_name);
+    app->text_font_size = j.value("text_font_size", app->text_font_size);
+    app->text_rotate = j.value("text_rotate", app->text_rotate);
+    app->text_scale = j.value("text_scale", app->text_scale);
+
+    if (j.contains("textPos") || j.contains("logoPos"))
+    {
+        objects = json::array();
+
+        if (j.contains("textPos"))
+        {
+            objects.push_back({
+                {"x", j["textPos"][0]},
+                {"y", j["textPos"][1]},
+                {"text_font_name", "Freeman-Regular.ttf"},
+                {"scale", app->text_scale},
+                {"rotate", app->text_rotate},
+                {"color", app->text_font_color},
+                {"type", "Signature"},
+            });
+        }
+
+        if (j.contains("logoPos"))
+        {
+            path full_path = path(app->logo_file_name);
+
+            objects.push_back({
+                {"x", j["logoPos"][0]},
+                {"y", j["logoPos"][1]},
+                {"image_name", full_path.filename().string()},
+                {"image_full_path", full_path.string()},
+                {"scale", app->logo_scale},
+                {"rotate", 0},
+                {"type", "Image"},
+            });
+        }
+    }
+    return true;
+}
+
+
+bool settings_read_v0_3(AppContext* app, json &j, json &objects)
+{
+    if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != version)
+    {
+        return false;
+    }
+
+    app->screen_rect_init = SDL_Rect(
+            j["screen_rect_init"][0],
+            j["screen_rect_init"][1],
+            j["screen_rect_init"][2],
+            j["screen_rect_init"][3]
+    );
+    app->crop_bottom = j.value("crop_bottom", app->crop_bottom);
+    app->alpha = j.value("alpha", app->alpha);
+    app->hidden = j.value("hidden", false);
+    app->idle_delay_ms = j.value("idle_delay_ms", app->idle_delay_ms);
+    app->line_width = j.value("line_width", app->line_width);
+    app->line_color = get_color_value(j, "line_color", app->line_color);
+    app->line_dashed = j.value("line_dashed", app->line_dashed);
+    app->line_dashed_gap = j.value("line_dashed_gap", app->line_dashed_gap);
+    app->line_dashed_len = j.value("line_dashed_len", app->line_dashed_len);
+    app->line_slope_dx = j.value("line_slope_dx", app->line_slope_dx);
+    app->line_slope_dy = j.value("line_slope_dy", app->line_slope_dy);
+    app->logo_file_name = j.value("logo_file_name", app->logo_file_name);
+    app->logo_scale = j.value("logo_scale", app->logo_scale);
+    app->logo_alpha = j.value("logo_alpha", app->logo_alpha);
+    app->text_content = j.value("text_content", app->text_content);
+    app->text_file_name = j["text_file_name"];
+    app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
+    app->text_font_name = j.value("text_font_name", app->text_font_name);
+    app->text_font_size = j.value("text_font_size", app->text_font_size);
+    app->text_rotate = j.value("text_rotate", app->text_rotate);
+    app->text_scale = j.value("text_scale", app->text_scale);
+    app->text_alpha = j.value("text_alpha", app->text_alpha);
+
+    if (j.contains("objects")) objects = j["objects"];
+
+    return true;
+}
+
+
 bool settings_read(AppContext* app, json &objects)
 {
     char username[32];
@@ -2369,70 +2506,27 @@ bool settings_read(AppContext* app, json &objects)
         try
         {
             file >> j;
+
+            if (
+                !settings_read_v0_3(app, j, objects) &&
+                !settings_read_v0_2(app, j, objects)
+            )
+            {
+                SDL_Log(
+                    "Settings file version mismatch, should be \"%s\".\n",
+                    version);
+                SDL_Log("Using default settings.");
+            }
         }
         catch (const std::exception& e)
         {
+            file.close();
             SDL_Log("Error reading settings: %s", e.what());
             SDL_Log("Delete settings file and restart to reset settings.");
-            file.close();
-            app->app_quit = SDL_APP_FAILURE;
-            SDL_Quit();
+            SDL_SetError("Error reading settings: %s", e.what());
             return false;
         }
         file.close();
-
-        try
-        {
-            if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != version)
-            {
-                SDL_Log(
-                        "Settings file version mismatch, should be \"%s\".\n"
-                        "Delete settings file and restart to reset settings.",
-                        version);
-                return false;
-            }
-            else
-            {
-                app->screen_rect_init = SDL_Rect(
-                        j["screen_rect_init"][0],
-                        j["screen_rect_init"][1],
-                        j["screen_rect_init"][2],
-                        j["screen_rect_init"][3]
-                );
-                app->crop_bottom = j.value("crop_bottom", app->crop_bottom);
-                app->alpha = j.value("alpha", app->alpha);
-                app->hidden = j.value("hidden", false);
-                app->idle_delay_ms = j.value("idle_delay_ms", app->idle_delay_ms);
-                app->line_width = j.value("line_width", app->line_width);
-                app->line_color = get_color_value(j, "line_color", app->line_color);
-                app->line_dashed = j.value("line_dashed", app->line_dashed);
-                app->line_dashed_gap = j.value("line_dashed_gap", app->line_dashed_gap);
-                app->line_dashed_len = j.value("line_dashed_len", app->line_dashed_len);
-                app->line_slope_dx = j.value("line_slope_dx", app->line_slope_dx);
-                app->line_slope_dy = j.value("line_slope_dy", app->line_slope_dy);
-                app->logo_file_name = j.value("logo_file_name", app->logo_file_name);
-                app->logo_scale = j.value("logo_scale", app->logo_scale);
-                app->logo_alpha = j.value("logo_alpha", app->logo_alpha);
-                app->text_content = j.value("text_content", app->text_content);
-                app->text_file_name = j["text_file_name"];
-                app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
-                app->text_font_name = j.value("text_font_name", app->text_font_name);
-                app->text_font_size = j.value("text_font_size", app->text_font_size);
-                app->text_rotate = j.value("text_rotate", app->text_rotate);
-                app->text_scale = j.value("text_scale", app->text_scale);
-                app->text_alpha = j.value("text_alpha", app->text_alpha);
-                if (j.contains("objects")) objects = j["objects"];
-            }
-        }
-        catch (const std::exception& e)
-        {
-            SDL_Log("Error reading settings: %s", e.what());
-            SDL_Log("Delete settings file and restart to reset settings.");
-            app->app_quit = SDL_APP_FAILURE;
-            SDL_Quit();
-            return false;
-        }
-
         SDL_Log("Settings read.");
     }
 
