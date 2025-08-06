@@ -2426,10 +2426,12 @@ bool settings_read_v0_2(AppContext* app, json &j, json &objects)
             objects.push_back({
                 {"x", j["textPos"][0]},
                 {"y", j["textPos"][1]},
-                {"text_font_name", "Freeman-Regular.ttf"},
+                {"text", app->text_content},
+                {"font_name", "Freeman-Regular.ttf"},
+                {"font_size", app->text_font_size},
+                {"font_color", app->text_font_color},
                 {"scale", app->text_scale},
                 {"rotate", app->text_rotate},
-                {"color", app->text_font_color},
                 {"type", "Signature"},
             });
         }
@@ -2449,6 +2451,7 @@ bool settings_read_v0_2(AppContext* app, json &j, json &objects)
             });
         }
     }
+    app->is_virgin = false;
     return true;
 }
 
