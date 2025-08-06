@@ -1460,11 +1460,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         app->needs_redraw = false;
     }
 
-    if (app->line_width > 0 && app->line_dashed && app->line_dashed_gap > 0 && !app->hidden)
+    if (app->line_dashed && app->line_dashed_gap > 0 && app->line_width > 0 && !app->hidden)
     {
-        Uint64 threshold = app->idle_ticks + app->idle_delay_ms;
+        Sint64 delay = (Sint64)(ticks - app->idle_ticks);
 
-        if (ticks >= threshold)
+        if (delay >= app->idle_delay_ms)
         {
             timeout = 0;
             app->idle_ticks = ticks;
@@ -1472,12 +1472,12 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         }
         else
         {
-            timeout = (int)(threshold - ticks);
+            timeout = SDL_max(0, app->idle_delay_ms - (int)delay);
         }
     }
 
 
-    if (app->have_animations)
+    if (app->have_animations && !app->hidden)
     {
         for (auto &obj: app->screen_objects)
         {
@@ -1485,8 +1485,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
             if (gif && gif->valid())
             {
-                Uint64 next_frame_ticks = gif->latest_ticks + gif->frame_info[gif->current_frame].delay_ms;
-                if (ticks > next_frame_ticks)
+                Uint64 delay = (Sint64)(ticks - gif->latest_ticks);
+                if (delay >= gif->frame_info[gif->current_frame].delay_ms)
                 {
                     gif->current_frame = (gif->current_frame + 1) % gif->frame_count;
                     gif->render_frame(app->renderer);
@@ -1495,7 +1495,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                 }
                 else
                 {
-                    timeout = SDL_min((timeout < 0) ? app->idle_delay_ms : timeout, (int) (next_frame_ticks - ticks));
+                    timeout = SDL_min(
+                                (timeout < 0) ? app->idle_delay_ms : timeout,
+                                SDL_max(
+                                        0, gif->frame_info[gif->current_frame].delay_ms - (int)delay));
                     // SDL_Log("next frame in %i ms", (int) (timeout));
                 }
             }
