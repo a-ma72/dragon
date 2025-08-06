@@ -43,6 +43,12 @@ class ScreenObject;
 class Signature;
 class Image;
 
+SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]);
+SDL_AppResult SDL_AppIterate(void *appstate);
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event);
+void SDL_AppQuit(void* appstate, SDL_AppResult result);
+SDL_AppResult app_init_failed();
+
 void update_screen_metrics(AppContext* app);
 void update_layout_mode(AppContext* app);
 void init_screen_objects(AppContext* app, json &objects);
@@ -57,19 +63,21 @@ COLORREF hex_color_to_int(const string& hex);
 bool screen_objects_add_text(float x, float y, const char* text, AppContext *app);
 bool screen_objects_add_image(float x, float y, const char *full_path_name, AppContext *app);
 void clipboard_insert(AppContext *app);
-double round_to_precision(double value, int precision);
+double round_to_precision(double value, int decimals);
 void settings_write(AppContext* app);
 bool settings_read_v0_2(AppContext* app, json &j, json &objects);
 bool settings_read_v0_3(AppContext* app, json &j, json &objects);
 bool settings_read(AppContext* app, json &objects);
-SDL_AppResult app_init_failed();
 
 
 #define UPDATE_VIEW_CHANGED 1
 #define UPDATE_SETTINGS_CHANGED 2
 
+#define BLENDED_ALPHA(img_alpha_1, glob_alpha_255) SDL_min(255, (int)((((float)img_alpha_1 * 0.5) + (float)glob_alpha_255 / 255.f * 0.8 + 0.1) * 255.f))
 
-struct AppContext {
+
+struct AppContext
+{
     path base_path;
     SDL_Window *window = nullptr;
     SDL_Renderer *renderer = nullptr;
@@ -112,7 +120,7 @@ struct AppContext {
     int text_font_size = 78;
     COLORREF text_font_color = RGB(112, 146, 190);
     float text_scale = 0.4f;
-    float text_rotate = 0.0f;
+    float text_rotate = 0.f;
     int text_alpha = 255;
 
     // Logo (initial) properties
@@ -182,8 +190,8 @@ public:
     {
         SDL_Vertex verts[4];
         SDL_FPoint texcoords[4] = {
-            {0.0f, 0.0f}, {1.0f, 0.0f},
-            {0.0f, 1.0f}, {1.0f, 1.0f}
+            {0.f, 0.f}, {1.f, 0.f},
+            {0.f, 1.f}, {1.f, 1.f}
         };
 
         // Apply flipping to texcoords
@@ -205,12 +213,12 @@ public:
         }
 
         // Center point
-        float cx = x + w / 2.0f;
-        float cy = y + h / 2.0f;
+        float cx = x + w / 2.f;
+        float cy = y + h / 2.f;
 
         // Apply scaling
-        float hw = (w / 2.0f) * scale;
-        float hh = (h / 2.0f) * scale;
+        float hw = (w / 2.f) * scale;
+        float hh = (h / 2.f) * scale;
 
         SDL_FPoint corners[4] = {
             {-hw, -hh}, {+hw, -hh},
@@ -218,7 +226,7 @@ public:
         };
 
         // Rotation
-        float angle_rad = rotate * (float)M_PI / 180.0f;
+        float angle_rad = rotate * (float)M_PI / 180.f;
         float cos_a = cosf(angle_rad);
         float sin_a = sinf(angle_rad);
 
@@ -228,7 +236,7 @@ public:
 
             verts[i].position.x = cx + rx;
             verts[i].position.y = cy + ry;
-            verts[i].color = {1.0, 1.0, 1.0, (float)alpha / 255.0f};
+            verts[i].color = {1.0, 1.0, 1.0, (float)alpha / 255.f};
             verts[i].tex_coord = texcoords[i];
         }
 
@@ -279,11 +287,11 @@ public:
                 j.value("text", "Example"),
                 j["x"], j["y"],
                 j.value("font_name", "Freeman-Regular.TTF"),
-                j.value("font_size", 80.0f),
+                j.value("font_size", 80.f),
                 get_color_value(j, "font_color", 0xffffff),
                 font_path,
-                j.value("scale", 1.0f),
-                j.value("rotate", 0.0f),
+                j.value("scale", 1.f),
+                j.value("rotate", 0.f),
                 j.value("alpha", 255),
                 renderer);
         }
@@ -332,7 +340,7 @@ protected:
         this->font_name = font_name;
         this->font_size = font_size;
         this->font_color = font_color;
-        this->alpha = (float)alpha / 255.0f;
+        this->alpha = (float)alpha / 255.f;
 
         for (;;)
         {
@@ -387,7 +395,7 @@ public:
              {"text", text},
              {"scale", round_to_precision(scale, 4)},
              {"rotate", round_to_precision(rotate, 4)},
-             {"alpha", (int)(alpha * 255.0f)},
+             {"alpha", (int)(alpha * 255.f)},
              {"font_name", font_name},
              {"font_size", round_to_precision(font_size, 1)},
              {"font_color", int_to_hex_color(font_color)},
@@ -450,11 +458,11 @@ public:
                     // Change text alpha
                     if (event->wheel.y < 0)
                     {
-                        alpha = SDL_max(0.0f, alpha - (5.0f / 255.0f));
+                        alpha = SDL_max(0.f, alpha - (5.f / 255.f));
                     }
                     else
                     {
-                        alpha = SDL_min(1.0f, alpha + (5.0f / 255.0f));
+                        alpha = SDL_min(1.f, alpha + (5.f / 255.f));
                     }
                     needs_update = UPDATE_SETTINGS_CHANGED;
                     return true;
@@ -554,7 +562,7 @@ public:
                 (float)extent.w * scale,
                 (float)extent.h * scale
             };
-            SDL_SetTextureAlphaMod(texture, (int)((alpha * 0.8 + 50) * this->alpha));
+            SDL_SetTextureAlphaMod(texture, (int)BLENDED_ALPHA(this->alpha, alpha));
             SDL_RenderTextureRotated(renderer, texture, nullptr, &rc, rotate, nullptr, SDL_FLIP_NONE);
         }
     }
@@ -631,8 +639,8 @@ public:
                 j["x"], j["y"],
                 j.value("image_name", ""),
                 j.value("image_full_path", ""),
-                j.value("scale", 1.0f),
-                j.value("rotate", 0.0f),
+                j.value("scale", 1.f),
+                j.value("rotate", 0.f),
                 j.value("flip_horizontal", false),
                 j.value("alpha", 255),
                 renderer);
@@ -672,7 +680,7 @@ protected:
         scale = scale_by;
         rotate = rotate_by;
         this->flip_horizontal = flip_horizontal;
-        this->alpha = (float)alpha / 255.0f;
+        this->alpha = (float)alpha / 255.f;
 
         if (!renderer) return;
 
@@ -722,7 +730,7 @@ public:
              {"scale", round_to_precision(scale, 4)},
              {"rotate", round_to_precision(rotate, 4)},
              {"flip_horizontal", (bool)flip_horizontal},
-             {"alpha", (int)(alpha * 255.0f)},
+             {"alpha", (int)(alpha * 255.f)},
              {"type", type_name()}
         });
     }
@@ -797,11 +805,11 @@ public:
                     // Change text alpha
                     if (event->wheel.y < 0)
                     {
-                        alpha = SDL_max(0.0f, alpha - (5.0f / 255.0f));
+                        alpha = SDL_max(0.f, alpha - (5.f / 255.f));
                     }
                     else
                     {
-                        alpha = SDL_min(1.0f, alpha + (5.0f / 255.0f));
+                        alpha = SDL_min(1.f, alpha + (5.f / 255.f));
                     }
                 }
                 needs_update = UPDATE_SETTINGS_CHANGED;
@@ -898,7 +906,7 @@ public:
                 x, y, w, h,
                 scale, rotate,
                 flip_horizontal, false,
-                (int)((alpha * 0.8 + 50) * this->alpha),
+                (int)BLENDED_ALPHA(this->alpha, alpha),
                 renderer);
     }
 
@@ -951,8 +959,8 @@ public:
                 j["x"], j["y"],
                 j.value("image_name", ""),
                 j.value("image_full_path", ""),
-                j.value("scale", 1.0f),
-                j.value("rotate", 0.0f),
+                j.value("scale", 1.f),
+                j.value("rotate", 0.f),
                 j.value("flip_horizontal", false),
                 j.value("alpha", 255),
                 j.value("cache_frames", true),
@@ -998,7 +1006,7 @@ protected:
         frame_count = 0;
         current_frame = 0;
         recent_disposal = DISPOSAL_UNSPECIFIED;
-        this->alpha = (float)alpha / 255.0f;
+        this->alpha = (float)alpha / 255.f;
         this->cache_frames = cache_frames;
 
         if (!renderer) return;
@@ -1070,7 +1078,7 @@ public:
              {"scale", round_to_precision(scale, 4)},
              {"rotate", round_to_precision(rotate, 4)},
              {"flip_horizontal", (bool)flip_horizontal},
-             {"alpha", (int)(alpha * 255.0f)},
+             {"alpha", (int)(alpha * 255.f)},
              {"cache_frames", (bool)cache_frames},
              {"type", type_name()}
         });
@@ -1108,7 +1116,7 @@ public:
                 x, y, w, h,
                 scale, rotate,
                 flip_horizontal, false,
-                (int)((alpha * 0.8 + 50) * this->alpha),
+                (int)BLENDED_ALPHA(this->alpha, alpha),
                 renderer);
     }
 
@@ -1157,10 +1165,10 @@ public:
                     GifColorType *color = &color_map->Colors[bg_color];
                     SDL_ClearSurface(
                             surface,
-                            (float)color->Red / 255.0f,
-                            (float)color->Green / 255.0f,
-                            (float)color->Blue / 255.0f,
-                            1.0f);
+                            (float)color->Red / 255.f,
+                            (float)color->Green / 255.f,
+                            (float)color->Blue / 255.f,
+                            1.f);
                 }
                 break;
             }
@@ -1457,7 +1465,6 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (app->needs_redraw)
     {
         draw(app);
-        app->needs_redraw = false;
     }
 
     if (app->line_dashed && app->line_dashed_gap > 0 && app->line_width > 0 && !app->hidden)
@@ -1765,8 +1772,8 @@ void update_screen_metrics(AppContext* app)
     }
     app->work_area.h -= app->crop_bottom;
 
-    app->center_x = (float) app->work_area.x + (float) app->work_area.w / 2.0f;
-    app->center_y = (float) app->work_area.y + (float) app->work_area.h / 2.0f;
+    app->center_x = (float) app->work_area.x + (float) app->work_area.w / 2.f;
+    app->center_y = (float) app->work_area.y + (float) app->work_area.h / 2.f;
 }
 
 
@@ -1861,8 +1868,8 @@ bool screen_objects_add_text(float x, float y, const char* text, AppContext *app
         (float)app->text_font_size,
         app->text_font_color,
         app->base_path,
-        1.0f,
-        0.0f,
+        1.f,
+        0.f,
         255,
         app->renderer);
 
@@ -1903,7 +1910,7 @@ bool screen_objects_add_image(float x, float y, const char *full_path_name, AppC
                         y,
                         fullpath.filename().string(),
                         fullpath.parent_path().string(),
-                        1.0f, 0.0f, false,
+                        1.f, 0.f, false,
                         255,
                         true,
                         app->renderer);
@@ -1925,7 +1932,7 @@ bool screen_objects_add_image(float x, float y, const char *full_path_name, AppC
                         y,
                         fullpath.filename().string(),
                         fullpath.parent_path().string(),
-                        1.0f, 0.0f, false,
+                        1.f, 0.f, false,
                         255,
                         app->renderer);
 
@@ -2392,7 +2399,7 @@ void settings_write(AppContext* app)
 
 bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 {
-    app->crop_bottom = j.value("task_bar_height", app->crop_bottom);
+    app->crop_bottom = 0;  // j.value("task_bar_height", app->crop_bottom);
     app->alpha = j.value("alpha", app->alpha);
     app->hidden = (bool)j.value("hidden", 0);
     app->line_width = j.value("line_width", app->line_width);
