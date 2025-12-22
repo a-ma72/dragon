@@ -22,7 +22,7 @@
 #include "json.hpp"
 #include "gif_lib.h"
 
-extern "C" const char *version = "0.3";
+extern "C" const char *version = "0.4";
 extern "C" const char *signature = "Dragon Signature";
 
 using std::string;
@@ -39,9 +39,12 @@ std::uniform_int_distribution<int> dist(0, RAND_MAX);
 
 // prototypes
 struct AppContext;
+
 class ScreenObject;
+class LineObject;
 class Signature;
 class Image;
+class AnimatedGif;
 
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]);
 SDL_AppResult SDL_AppIterate(void *appstate);
@@ -53,13 +56,13 @@ void update_screen_metrics(AppContext* app);
 void update_layout_mode(AppContext* app);
 void init_screen_objects(AppContext* app, json &objects);
 void free_screen_objects(AppContext* app);
-void draw_line_bresenham(int x1, int y1, int dx, int dy, int dash_len, int gap_len, void *color, SDL_Surface* surface);
-void draw_lines(AppContext *app);
+void draw_line_bresenham(int x1, int y1, int dx, int dy, int dash_len, int gap_len, int dash_offset, void *color, SDL_Surface* surface);
 void draw(AppContext* app);
 bool color_from_key(int key, COLORREF &color);
 string int_to_hex_color(COLORREF color);
 COLORREF get_color_value(const json& j, const string& key, COLORREF default_value);
 COLORREF hex_color_to_int(const string& hex);
+bool screen_objects_add_lines(AppContext *app);
 bool screen_objects_add_text(float x, float y, const char* text, AppContext *app);
 bool screen_objects_add_image(float x, float y, const char *full_path_name, AppContext *app);
 void clipboard_insert(AppContext *app);
@@ -73,7 +76,8 @@ bool settings_read(AppContext* app, json &objects);
 #define UPDATE_VIEW_CHANGED 1
 #define UPDATE_SETTINGS_CHANGED 2
 
-#define BLENDED_ALPHA(img_alpha_1, glob_alpha_255) SDL_min(255, (int)((((float)img_alpha_1 * 0.5) + (float)glob_alpha_255 / 255.f * 0.8 + 0.1) * 255.f))
+#define BLENDED_ALPHA_FLOAT(img_alpha, glob_alpha) SDL_min(1.f, (float)img_alpha * 0.5f + (float)glob_alpha * 0.8f + 0.1f)
+#define BLENDED_ALPHA_INT(img_alpha, glob_alpha) SDL_min(255, (int)(BLENDED_ALPHA_FLOAT(img_alpha, glob_alpha) * 255.f))
 
 
 struct AppContext
@@ -93,7 +97,7 @@ struct AppContext
     float center_x = 400, center_y = 300;
 
     bool hidden = false;
-    int alpha = 136;
+    float alpha = 0.55f;
     bool layout_mode = false;
     bool is_virgin = true;
     int idle_delay_ms = 600;
@@ -104,29 +108,20 @@ struct AppContext
     ScreenObject *mouse_capture = nullptr;
     SDL_FPoint dragging_origin = {0}, dragging_offset = {0};
 
-    // Line properties
-    int line_width = 1;
-    COLORREF line_color = RGB(0, 0, 0);
-    bool line_dashed = true;
-    int line_dashed_len = 10;
-    int line_dashed_gap = 10;
-    int line_slope_dx = 10;
-    int line_slope_dy = 10;
-
     // Text (initial) properties
     string text_file_name = "signature.txt";
-    string text_content = "";
+    string text_content;
     string text_font_name = "Freeman-Regular.TTF";
     int text_font_size = 78;
     COLORREF text_font_color = RGB(112, 146, 190);
     float text_scale = 0.4f;
     float text_rotate = 0.f;
-    int text_alpha = 255;
+    float text_alpha = 1.f;
 
     // Logo (initial) properties
     string logo_file_name = "dragon.png";
     float logo_scale = 0.2f;
-    int logo_alpha = 255;
+    float logo_alpha = 1.f;
 
     // Animated GIF
     bool have_animations = false;
@@ -136,17 +131,15 @@ struct AppContext
 class ScreenObject
 {
 public:
-    SDL_FPoint pos;
-    SDL_Rect extent;
-    float scale;
-    float rotate;
-    float alpha;
-    bool deleted;
+    SDL_FPoint pos = {0, 0};
+    SDL_Rect extent = {0, 0, 0, 0};
+    float scale = 1.f;
+    float rotate = 0.f;
+    float alpha = 1.f;
+    bool deleted = false;
 
     ScreenObject(float x, float y)
-    : pos(x, y),
-      extent(0, 0, 0, 0),
-      deleted(false)
+    : pos(x, y)
     {};
 
     virtual ~ScreenObject() = default;
@@ -155,7 +148,7 @@ public:
     [[nodiscard]] virtual bool valid() const = 0;
     [[nodiscard]] virtual bool hit_test(SDL_FPoint pt) const {return false;}
     virtual bool handle_event(const SDL_Event* event, int &needs_update, AppContext *app) = 0;
-    virtual void draw(const SDL_FPoint &pt, int alpha, SDL_Renderer *renderer) const = 0;
+    virtual void draw(const SDL_FPoint &pt, float alpha, const SDL_Renderer* renderer) const = 0;
 
     [[nodiscard]]
     virtual bool hit_test_at_cursor() const
@@ -185,9 +178,11 @@ public:
         float scale,
         float rotate,
         bool flip_x, bool flip_y,
-        int alpha,
-        SDL_Renderer *renderer)
+        float alpha,
+        const SDL_Renderer *renderer)
     {
+        if (!renderer) return;
+
         SDL_Vertex verts[4];
         SDL_FPoint texcoords[4] = {
             {0.f, 0.f}, {1.f, 0.f},
@@ -236,12 +231,388 @@ public:
 
             verts[i].position.x = cx + rx;
             verts[i].position.y = cy + ry;
-            verts[i].color = {1.0, 1.0, 1.0, (float)alpha / 255.f};
+            verts[i].color = {1.0, 1.0, 1.0, alpha};
             verts[i].tex_coord = texcoords[i];
         }
 
         int indices[6] = {0, 1, 2, 1, 3, 2};
-        SDL_RenderGeometry(renderer, texture, verts, 4, indices, 6);
+        SDL_RenderGeometry(
+                const_cast<SDL_Renderer*>(renderer),
+                texture,
+                verts,
+                4,
+                indices,
+                6);
+    }
+};
+
+
+class LineObject : public ScreenObject
+{
+
+public:
+    int width;
+    COLORREF color;
+    bool dashed;
+    int dashed_len;
+    int dashed_gap;
+    float line_angle;
+    float line_spacing;
+    SDL_Rect work_area;
+    const Uint64 &idle_ticks;
+
+    LineObject(
+        const SDL_Rect &work_area,
+        const Uint64 &idle_ticks,
+        int width = 1,
+        COLORREF color = 0,
+        bool dashed = true,
+        int dash_len = 10,
+        int dash_gap = 10,
+        float line_angle = 45.f,
+        float line_spacing = 15.f)
+        : ScreenObject(0, 0),
+        width(width),
+        color(color),
+        dashed(dashed),
+        dashed_len(dash_len),
+        dashed_gap(dash_gap),
+        line_angle(line_angle),
+        line_spacing(line_spacing),
+        work_area(work_area),
+        idle_ticks(idle_ticks)
+        {}
+
+    [[nodiscard]]
+    const char* type_name() const override { return "Lines"; }
+
+    [[nodiscard]]
+    json to_json() const override {
+        return json{
+            {"type", type_name()},
+            {"alpha", 1.f},
+            {"width", width},
+            {"color", int_to_hex_color(color)},
+            {"dashed", dashed},
+            {"dashed_len", dashed_len},
+            {"dashed_gap", dashed_gap},
+            {"line_angle", round_to_precision(line_angle, 4)},
+            {"line_spacing", round_to_precision(line_spacing, 1)}
+        };
+    }
+
+    [[nodiscard]]
+    bool valid() const override { return true; }
+
+    [[nodiscard]]
+    bool hit_test(SDL_FPoint pt) const override {
+        // The line object is not selectable
+        return false;
+    }
+
+    bool handle_event(const SDL_Event* event, int& needs_update, AppContext* app) override {
+        if (!app->layout_mode) return false;
+
+        if (event->type == SDL_EVENT_MOUSE_WHEEL)
+        {
+            if (SDL_GetModState() & SDL_KMOD_SHIFT)
+            {
+                // Adjust spacing
+                float scale_factor = (event->wheel.y > 0) ? 1.1f : 0.9f;
+                line_spacing *= scale_factor;
+                line_spacing = SDL_max(2.f, line_spacing);
+                line_spacing = SDL_min(50.f, line_spacing);
+                needs_update = UPDATE_SETTINGS_CHANGED;
+                app->is_virgin = false;
+                return true;
+            }
+            else if (SDL_GetModState() & SDL_KMOD_CTRL)
+            {
+                // Adjust orientation
+                float angle_delta = (event->wheel.y > 0) ? 5.f : -5.f; // degrees
+                line_angle += angle_delta;
+                needs_update = UPDATE_SETTINGS_CHANGED;
+                app->is_virgin = false;
+                return true;
+            }
+        }
+        else if (event->type == SDL_EVENT_KEY_DOWN)
+        {
+            COLORREF c;
+            if (color_from_key((int)event->key.key, c))
+            {
+                this->color = c;
+                needs_update = UPDATE_SETTINGS_CHANGED;
+                app->is_virgin = false;
+                return true;
+            }
+            else if (event->key.key >= SDLK_0 && event->key.key <= SDLK_5)
+            {
+                this->width = (int)(event->key.key - SDLK_0);
+                needs_update = UPDATE_SETTINGS_CHANGED;
+                app->is_virgin = false;
+                return true;
+            }
+            else if (event->key.key == SDLK_D)
+            {
+                this->dashed = !this->dashed;
+                needs_update = UPDATE_SETTINGS_CHANGED;
+                app->is_virgin = false;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void draw(const SDL_FPoint& pt, float global_alpha, const SDL_Renderer* renderer) const override
+    {
+        if (this->width == 0) return;
+        if (!valid() || !renderer) return;
+
+        int wa_width = work_area.w;
+        int wa_height = work_area.h;
+
+        float angle_rad = line_angle * (float)M_PI / 180.f;
+        float sa = sinf(angle_rad);
+        float ca = cosf(angle_rad);
+
+        // Line equation: -sa*x + ca*y = C
+        float c00 = 0;
+        float c10 = -sa * (float)wa_width;
+        float c01 = ca * (float)wa_height;
+        float c11 = -sa * (float)wa_width + ca * (float)wa_height;
+        float c_min = (std::min)({c00, c10, c01, c11});
+        float c_max = (std::max)({c00, c10, c01, c11});
+
+        if (this->width > 1 && !this->dashed)
+        {
+            SDL_Color rgba = {
+                GetRValue(color),
+                GetGValue(color),
+                GetBValue(color),
+                SDL_min((Uint8)255, (Uint8)(global_alpha * 255.f))
+            };
+            SDL_FColor frgba = {
+                rgba.r / 255.f,
+                rgba.g / 255.f,
+                rgba.b / 255.f,
+                rgba.a / 255.f
+            };
+
+            for (float c = c_min; c < c_max; c += line_spacing)
+            {
+                // find intersections with screen boundaries
+                vector<SDL_Point> intersections;
+
+                if (sa != 0)
+                {
+                    float x = -c / sa;
+                    if (x >= 0 && x <= (float)wa_width) intersections.push_back({(int)x, 0});
+                }
+                if (sa != 0)
+                {
+                    float x = ((float)wa_height * ca - c) / sa;
+                    if (x >= 0 && x <= (float)wa_width) intersections.push_back({(int)x, wa_height});
+                }
+                if (ca != 0)
+                {
+                    float y = c / ca;
+                    if (y >= 0 && y <= (float)wa_height) intersections.push_back({0, (int)y});
+                }
+                if (ca != 0)
+                {
+                    float y = (c + (float)wa_width * sa) / ca;
+                    if (y >= 0 && y <= (float)wa_height) intersections.push_back({wa_width, (int)y});
+                }
+
+                if (intersections.size() >= 2)
+                {
+                    std::sort(
+                            intersections.begin(),
+                            intersections.end(),
+                            [](const SDL_Point& a, const SDL_Point& b)
+                            {
+                                if (a.x != b.x) return a.x < b.x;
+                                return a.y < b.y;
+                            }
+                    );
+                    intersections.erase(
+                            std::unique(
+                                    intersections.begin(),
+                                    intersections.end(),
+                                    [](const SDL_Point& a, const SDL_Point& b)
+                                    {
+                                        return a.x == b.x && a.y == b.y;
+                                    }
+                            ),
+                            intersections.end());
+
+                    if (intersections.size() >= 2)
+                    {
+                        SDL_Point p1 = intersections[0];
+                        SDL_Point p2 = intersections[1];
+
+                        auto dx = (float)(p2.x - p1.x);
+                        auto dy = (float)(p2.y - p1.y);
+                        float len = sqrtf(dx*dx + dy*dy);
+                        if (len == 0) continue;
+                        float nx = -dy / len;
+                        float ny = dx / len;
+                        float w = (float)width / 2.f;
+
+                        SDL_Vertex verts[4];
+                        verts[0].position = { (float)p1.x + nx * w, (float)p1.y + ny * w };
+                        verts[0].color = frgba;
+                        verts[0].tex_coord = { 0, 0 };
+                        verts[1].position = { (float)p1.x - nx * w, (float)p1.y - ny * w };
+                        verts[1].color = frgba;
+                        verts[1].tex_coord = { 0, 0 };
+                        verts[2].position = { (float)p2.x + nx * w, (float)p2.y + ny * w };
+                        verts[2].color = frgba;
+                        verts[2].tex_coord = { 0, 0 };
+                        verts[3].position = { (float)p2.x - nx * w, (float)p2.y - ny * w };
+                        verts[3].color = frgba;
+                        verts[3].tex_coord = { 0, 0 };
+
+                        int indices[] = { 0, 1, 2, 1, 3, 2 };
+                        SDL_RenderGeometry(
+                            const_cast<SDL_Renderer *>(renderer),
+                            nullptr,
+                            verts,
+                            4,
+                            indices,
+                            6);
+                    }
+                }
+            }
+        }
+        else
+        {
+            int gap_len = this->dashed ? this->dashed_gap : 0;
+            int dash_len = this->dashed_len;
+            int quarter_dash_len = (dash_len + 2) / 4;
+            Uint32 pixel;
+            SDL_Surface *surface;
+            SDL_Texture *texture;
+
+            gen.seed((unsigned)idle_ticks);
+            surface = SDL_CreateSurface(wa_width, wa_height, SDL_PIXELFORMAT_RGBA8888);
+            SDL_ClearSurface(surface, 0, 0, 0, 0);
+
+            pixel = SDL_MapSurfaceRGBA(
+                        surface,
+                        GetRValue(this->color),
+                        GetGValue(this->color),
+                        GetBValue(this->color),
+                        SDL_min((Uint8)255, (Uint8)(global_alpha * 255.f)));
+
+            SDL_LockSurface(surface);
+
+            for (float c = c_min; c < c_max; c += line_spacing)
+            {
+                int dash_offset = this->dashed ? dist(gen) % (dash_len + gap_len) : 0;
+                vector<SDL_Point> intersections;
+
+                if (sa != 0)
+                {
+                    float x = -c / sa;
+                    if (x >= 0 && x <= (float)wa_width) intersections.push_back({(int)x, 0});
+                }
+                if (sa != 0)
+                {
+                    float x = ((float)wa_height * ca - c) / sa;
+                    if (x >= 0 && x <= (float)wa_width) intersections.push_back({(int)x, wa_height});
+                }
+                if (ca != 0)
+                {
+                    float y = c / ca;
+                    if (y >= 0 && y <= (float)wa_height) intersections.push_back({0, (int)y});
+                }
+                if (ca != 0)
+                {
+                    float y = (c + (float)wa_width * sa) / ca;
+                    if (y >= 0 && y <= (float)wa_height) intersections.push_back({wa_width, (int)y});
+                }
+
+                if (intersections.size() >= 2)
+                {
+                    std::sort(
+                            intersections.begin(),
+                            intersections.end(),
+                            [](const SDL_Point& a, const SDL_Point& b)
+                            {
+                                if (a.x != b.x) return a.x < b.x;
+                                return a.y < b.y;
+                            }
+                    );
+                    intersections.erase(
+                            std::unique(intersections.begin(),
+                                        intersections.end(),
+                                        [](const SDL_Point& a, const SDL_Point& b)
+                                        {
+                                            return a.x == b.x && a.y == b.y;
+                                        }
+                            ),
+                            intersections.end());
+
+                    if (intersections.size() >= 2)
+                    {
+                        SDL_Point p1 = intersections[0];
+                        SDL_Point p2 = intersections[1];
+                        int dx = p2.x - p1.x;
+                        int dy = p2.y - p1.y;
+                        int jitter = 0;
+
+                        if (abs(dx) > abs(dy))
+                        { // more horizontal
+                            for (int d = -(this->width - 1) / 2; d <= this->width / 2; d++)
+                            {
+                                if (this->dashed)
+                                {
+                                    jitter = (dist(gen) % max(4, quarter_dash_len)) - quarter_dash_len / 2;
+                                }
+                                draw_line_bresenham(
+                                    p1.x, p1.y + d,
+                                    dx, dy,
+                                    dash_len, gap_len, dash_offset + jitter,
+                                    &pixel,
+                                    surface);
+                            }
+                        }
+                        else
+                        { // more vertical
+                            for (int d = -(this->width - 1) / 2; d <= this->width / 2; d++)
+                            {
+                                if (this->dashed)
+                                {
+                                    jitter = (dist(gen) % max(4, quarter_dash_len)) - quarter_dash_len / 2;
+                                }
+                                draw_line_bresenham(
+                                    p1.x + d, p1.y,
+                                    dx, dy,
+                                    dash_len, gap_len,
+                                    dash_offset + jitter,
+                                    &pixel, surface);
+                            }
+                        }
+                    }
+                }
+            }
+
+            SDL_UnlockSurface(surface);
+
+            texture = SDL_CreateTextureFromSurface(const_cast<SDL_Renderer *>(renderer), surface);
+            SDL_ClearSurface(surface, 0, 0, 0, 0);
+            SDL_DestroySurface(surface);
+
+            if (texture)
+            {
+                SDL_FRect rect = {0, 0, (float)wa_width, (float)wa_height};
+                SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+                SDL_RenderTexture(const_cast<SDL_Renderer *>(renderer), texture, nullptr, &rect);
+                SDL_DestroyTexture(texture);
+            }
+        }
     }
 };
 
@@ -254,32 +625,35 @@ public:
     string font_name;
     float font_size;
     COLORREF font_color;
+    const SDL_Renderer *renderer;
     SDL_Texture *texture;
     SDL_Surface *surface;
 
     Signature(
-            const string &signature,
-            float x,
-            float y,
-            const string &font_name,
-            float font_size,
-            COLORREF font_color,
-            const path &font_path,
-            float scale_by,
-            float rotate_by,
-            int alpha,
-            SDL_Renderer *renderer)
-            : ScreenObject(x, y),
-              texture(nullptr),
-              surface(nullptr)
+        const string &signature,
+        float x,
+        float y,
+        const string &font_name,
+        float font_size,
+        COLORREF font_color,
+        const path &font_path,
+        float scale_by,
+        float rotate_by,
+        float alpha,
+        const SDL_Renderer *renderer)
+        : ScreenObject(x, y),
+          texture(nullptr),
+          surface(nullptr),
+          renderer(renderer)
     {
-        init(signature, x, y, font_name, font_size, font_color, font_path, scale_by, rotate_by, alpha, renderer);
+        init(signature, x, y, font_name, font_size, font_color, font_path, scale_by, rotate_by, alpha);
     }
 
-    Signature(json &j, path &font_path, SDL_Renderer *renderer)
+    Signature(json &j, path &font_path, const SDL_Renderer *renderer)
     : ScreenObject(-1, -1),
       texture(nullptr),
-      surface(nullptr)
+      surface(nullptr),
+      renderer(renderer)
     {
         try
         {
@@ -292,8 +666,7 @@ public:
                 font_path,
                 j.value("scale", 1.f),
                 j.value("rotate", 0.f),
-                j.value("alpha", 255),
-                renderer);
+                j.value("alpha", 1.f));
         }
         catch (const std::exception &e)
         {
@@ -314,17 +687,16 @@ public:
 
 protected:
     void init(
-            const string &signature,
-            float x,
-            float y,
-            const string &font_name,
-            float font_size,
-            COLORREF font_color,
-            const path &font_path,
-            float scale_by,
-            float rotate_by,
-            int alpha,
-            SDL_Renderer *renderer)
+        const string &signature,
+        float x,
+        float y,
+        const string &font_name,
+        float font_size,
+        COLORREF font_color,
+        const path &font_path,
+        float scale_by,
+        float rotate_by,
+        float alpha)
     {
         TTF_Font* font = nullptr;
         const SDL_PixelFormatDetails *format_details;
@@ -340,7 +712,7 @@ protected:
         this->font_name = font_name;
         this->font_size = font_size;
         this->font_color = font_color;
-        this->alpha = (float)alpha / 255.f;
+        this->alpha = alpha;
 
         for (;;)
         {
@@ -359,12 +731,12 @@ protected:
                         GetBValue(font_color),
                         GetGValue(font_color),
                         GetRValue(font_color),
-                        alpha)
+                        (int)(alpha * 255.f))
             );
             if (!surface) break;
 
             // make a texture from the surface
-            texture = SDL_CreateTextureFromSurface(renderer, surface);
+            texture = SDL_CreateTextureFromSurface(const_cast<SDL_Renderer *>(renderer), surface);
             if (!texture) break;
 
             // get the on-screen dimensions of the text. this is necessary for rendering it
@@ -395,7 +767,7 @@ public:
              {"text", text},
              {"scale", round_to_precision(scale, 4)},
              {"rotate", round_to_precision(rotate, 4)},
-             {"alpha", (int)(alpha * 255.f)},
+             {"alpha", round_to_precision(alpha, 2)},
              {"font_name", font_name},
              {"font_size", round_to_precision(font_size, 1)},
              {"font_color", int_to_hex_color(font_color)},
@@ -552,9 +924,9 @@ public:
         return false;
     }
 
-    void draw(const SDL_FPoint &pt, int alpha, SDL_Renderer *renderer) const override
+    void draw(const SDL_FPoint &pt, float alpha, const SDL_Renderer *renderer) const override
     {
-        if (valid() && renderer)
+        if (valid() && renderer && renderer == this->renderer)
         {
             SDL_FRect rc = {
                 pt.x - (float)extent.x * scale,
@@ -562,14 +934,21 @@ public:
                 (float)extent.w * scale,
                 (float)extent.h * scale
             };
-            SDL_SetTextureAlphaMod(texture, (int)BLENDED_ALPHA(this->alpha, alpha));
-            SDL_RenderTextureRotated(renderer, texture, nullptr, &rc, rotate, nullptr, SDL_FLIP_NONE);
+            SDL_SetTextureAlphaMod(texture, BLENDED_ALPHA_INT(this->alpha, alpha));
+            SDL_RenderTextureRotated(
+                    const_cast<SDL_Renderer*>(renderer),
+                            texture,
+                            nullptr,
+                            &rc,
+                            rotate,
+                            nullptr,
+                            SDL_FLIP_NONE);
         }
     }
 
-    bool change_color(COLORREF color, SDL_Renderer *renderer)
+    bool change_color(COLORREF color, const SDL_Renderer *renderer)
     {
-        if (!valid() || !renderer || !surface) return false;
+        if (!valid() || !renderer || renderer != this->renderer || !surface) return false;
 
         auto pixels = (Uint32*)surface->pixels;
         auto format_details = SDL_GetPixelFormatDetails(surface->format);
@@ -584,7 +963,7 @@ public:
             pixels[i] = px;
         }
 
-        SDL_Texture* new_texture = SDL_CreateTextureFromSurface(renderer, surface);
+        SDL_Texture* new_texture = SDL_CreateTextureFromSurface(const_cast<SDL_Renderer*>(renderer), surface);
 
         if (!new_texture) return false;
         SDL_DestroyTexture(texture);
@@ -606,32 +985,42 @@ public:
     float rotate;
     float alpha;
     bool flip_horizontal;
+    const SDL_Renderer *renderer;
     SDL_Surface *surface;
     SDL_Texture *texture;
 
 protected:
-    Image(float x, float y) : ScreenObject(x, y), surface((SDL_Surface*)nullptr), texture((SDL_Texture*)nullptr) {}
+    Image(float x, float y, const SDL_Renderer *renderer = nullptr)
+    : ScreenObject(x, y),
+    surface((SDL_Surface*)nullptr),
+    texture((SDL_Texture*)nullptr),
+    renderer(renderer)
+    {}
 
 public:
     Image(
-            float x, float y,
-            const string &name,
-            const path &base_path,
-            float scale_by,
-            float rotate_by,
-            bool flip_horizontal,
-            int alpha,
-            SDL_Renderer *renderer)
-            : ScreenObject(x, y),
-              surface((SDL_Surface*)nullptr),
-              texture((SDL_Texture*)nullptr)
+        float x, float y,
+        const string &name,
+        const path &base_path,
+        float scale_by,
+        float rotate_by,
+        bool flip_horizontal,
+        float alpha,
+        const SDL_Renderer *renderer)
+        : ScreenObject(x, y),
+          surface((SDL_Surface*)nullptr),
+          texture((SDL_Texture*)nullptr),
+          renderer(renderer)
     {
         full_path = (base_path / name).string();
-        init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha, renderer);
+        init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha);
     }
 
-    Image(json &j, SDL_Renderer *renderer)
-    : ScreenObject(-1, -1)
+    Image(json &j, const SDL_Renderer *renderer)
+    : ScreenObject(-1, -1),
+    surface((SDL_Surface*)nullptr),
+    texture((SDL_Texture*)nullptr),
+    renderer(renderer)
     {
         try
         {
@@ -642,8 +1031,7 @@ public:
                 j.value("scale", 1.f),
                 j.value("rotate", 0.f),
                 j.value("flip_horizontal", false),
-                j.value("alpha", 255),
-                renderer);
+                j.value("alpha", 1.f));
         }
         catch (const std::exception &e)
         {
@@ -670,8 +1058,7 @@ protected:
             float scale_by,
             float rotate_by,
             bool flip_horizontal,
-            int alpha,
-            SDL_Renderer *renderer)
+            float alpha)
     {
         this->name = name;
         this->full_path = full_path;
@@ -680,9 +1067,9 @@ protected:
         scale = scale_by;
         rotate = rotate_by;
         this->flip_horizontal = flip_horizontal;
-        this->alpha = (float)alpha / 255.f;
+        this->alpha = alpha;
 
-        if (!renderer) return;
+        if (!this->renderer) return;
 
         // load the Image
         surface = IMG_Load(full_path.c_str());
@@ -704,7 +1091,7 @@ protected:
                 {
                     extent.x = extent.w / 2;
                     extent.y = extent.h / 2;
-                    texture = SDL_CreateTextureFromSurface(renderer, rgba_surface);
+                    texture = SDL_CreateTextureFromSurface(const_cast<SDL_Renderer *>(renderer), rgba_surface);
                 }
             }
         }
@@ -730,7 +1117,7 @@ public:
              {"scale", round_to_precision(scale, 4)},
              {"rotate", round_to_precision(rotate, 4)},
              {"flip_horizontal", (bool)flip_horizontal},
-             {"alpha", (int)(alpha * 255.f)},
+             {"alpha", round_to_precision(alpha, 2)},
              {"type", type_name()}
         });
     }
@@ -892,9 +1279,9 @@ public:
         return false;
     }
 
-    void draw(const SDL_FPoint &pt, int alpha, SDL_Renderer *renderer) const override
+    void draw(const SDL_FPoint &pt, float alpha, const SDL_Renderer *renderer) const override
     {
-        if (!valid()) return;
+        if (!valid() || !renderer || renderer != this->renderer) return;
 
         float x = pt.x - (float)extent.x;
         float y = pt.y - (float)extent.y;
@@ -906,7 +1293,7 @@ public:
                 x, y, w, h,
                 scale, rotate,
                 flip_horizontal, false,
-                (int)BLENDED_ALPHA(this->alpha, alpha),
+                BLENDED_ALPHA_FLOAT(this->alpha, alpha),
                 renderer);
     }
 
@@ -929,28 +1316,29 @@ public:
     int current_frame;
     int recent_disposal;
     Uint64 latest_ticks;
+    SDL_Rect previous_frame_rect;
     vector<frame_info_t> frame_info;
     GifFileType *gif;
 
     AnimatedGif(
-            float x, float y,
-            const string &name,
-            const path &base_path,
-            float scale_by,
-            float rotate_by,
-            bool flip_horizontal,
-            int alpha,
-            bool cache_frames,
-            SDL_Renderer *renderer)
-    : Image(x, y),
+        float x, float y,
+        const string &name,
+        const path &base_path,
+        float scale_by,
+        float rotate_by,
+        bool flip_horizontal,
+        float alpha,
+        bool cache_frames,
+        const SDL_Renderer *renderer)
+    : Image(x, y, renderer),
       gif((GifFileType*)nullptr)
     {
         full_path = (base_path / name).string();
-        init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha, cache_frames, renderer);
+        init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha, cache_frames);
     }
 
-    AnimatedGif(json &j, SDL_Renderer *renderer)
-    : Image(-1, -1),
+    AnimatedGif(json &j, const SDL_Renderer *renderer)
+    : Image(-1, -1, renderer),
       gif((GifFileType*)nullptr)
     {
         try
@@ -962,9 +1350,8 @@ public:
                 j.value("scale", 1.f),
                 j.value("rotate", 0.f),
                 j.value("flip_horizontal", false),
-                j.value("alpha", 255),
-                j.value("cache_frames", true),
-                renderer);
+                j.value("alpha", 1.f),
+                j.value("cache_frames", true));
         }
         catch (const std::exception &e)
         {
@@ -985,15 +1372,14 @@ public:
 
 protected:
     void init(
-            float x, float y,
-            const string &name,
-            const string &full_path,
-            float scale_by,
-            float rotate_by,
-            bool flip_horizontal,
-            int alpha,
-            bool cache_frames,
-            SDL_Renderer *renderer)
+        float x, float y,
+        const string &name,
+        const string &full_path,
+        float scale_by,
+        float rotate_by,
+        bool flip_horizontal,
+        float alpha,
+        bool cache_frames)
     {
         this->name = name;
         this->full_path = full_path;
@@ -1006,8 +1392,9 @@ protected:
         frame_count = 0;
         current_frame = 0;
         recent_disposal = DISPOSAL_UNSPECIFIED;
-        this->alpha = (float)alpha / 255.f;
+        this->alpha = alpha;
         this->cache_frames = cache_frames;
+        this->previous_frame_rect = {0, 0, 0, 0};
 
         if (!renderer) return;
 
@@ -1056,7 +1443,7 @@ protected:
             {
                 SDL_ClearSurface(surface, 0, 0, 0, 0);
             }
-            render_frame(renderer);
+            render_frame(const_cast<SDL_Renderer*>(renderer));
             extent.w = gif->SWidth;
             extent.h = gif->SHeight;
             extent.x = extent.w / 2;
@@ -1078,7 +1465,7 @@ public:
              {"scale", round_to_precision(scale, 4)},
              {"rotate", round_to_precision(rotate, 4)},
              {"flip_horizontal", (bool)flip_horizontal},
-             {"alpha", (int)(alpha * 255.f)},
+             {"alpha", round_to_precision(alpha, 2)},
              {"cache_frames", (bool)cache_frames},
              {"type", type_name()}
         });
@@ -1102,25 +1489,31 @@ public:
         return result;
     }
 
-    void draw(const SDL_FPoint &pt, int alpha, SDL_Renderer *renderer) const override
+    void draw(const SDL_FPoint &pt, float alpha, const SDL_Renderer *renderer) const override
     {
+        // If the GIF is not valid or the renderer is not available, do nothing.
         if (!valid()) return;
 
+        // Calculate the position and dimensions of the GIF on the screen.
         float x = pt.x - (float)extent.x;
         float y = pt.y - (float)extent.y;
         float w = (float)extent.w;
         float h = (float)extent.h;
 
+        // Render the current frame of the GIF with the specified transformations.
         render_transformed_texture(
                 texture,
                 x, y, w, h,
                 scale, rotate,
                 flip_horizontal, false,
-                (int)BLENDED_ALPHA(this->alpha, alpha),
+                BLENDED_ALPHA_FLOAT(this->alpha, alpha),
                 renderer);
     }
 
-    void render_frame(SDL_Renderer *renderer)
+    // The render_frame function is the core of the animated GIF rendering.
+    // It is responsible for decoding the current frame, handling disposal methods,
+    // and updating the texture that is displayed on the screen.
+    void render_frame(const SDL_Renderer *renderer)
     {
         SavedImage *frame;
         int left, top, width, height;
@@ -1129,10 +1522,12 @@ public:
         int bg_color;
         frame_info_t *frame_info = &this->frame_info[current_frame];
         int transparent_color;
-        Uint32 *addr, pixel;
+        Uint32 *addr;
 
+        // If the GIF is not valid or the renderer is not available, do nothing.
         if (!valid() || !renderer) return;
 
+        // If the texture for the current frame is already cached, just use it.
         if (!frame_info->texture_outdated)
         {
             texture = frame_info->texture;
@@ -1140,9 +1535,10 @@ public:
             return;
         }
 
+        // If the surface is not valid or the pixel format is not RGBA8888, do nothing.
         if (!surface || surface->format != SDL_PIXELFORMAT_RGBA8888) return;
 
-        // Prepare canvas
+        // Prepare canvas for the current frame
         if (!gif || !gif->SavedImages) return;
         frame = &gif->SavedImages[current_frame];
         bg_color = gif->SBackGroundColor;
@@ -1151,32 +1547,41 @@ public:
         color_map = frame->ImageDesc.ColorMap ? frame->ImageDesc.ColorMap : gif->SColorMap;
         if (!color_map) return;
 
+        // Handle the disposal method of the previous frame.
         switch (recent_disposal)
         {
-            case DISPOSAL_UNSPECIFIED:
             case DISPOSE_BACKGROUND:
             {
+                // Clear the area of the previous frame to the background color.
                 if (bg_color == NO_TRANSPARENT_COLOR || bg_color < color_map->ColorCount)
                 {
-                    SDL_ClearSurface(surface, 0, 0, 0, 0);
+                    SDL_FillSurfaceRect(surface, &previous_frame_rect, 0);
                 }
                 else
                 {
                     GifColorType *color = &color_map->Colors[bg_color];
-                    SDL_ClearSurface(
-                            surface,
-                            (float)color->Red / 255.f,
-                            (float)color->Green / 255.f,
-                            (float)color->Blue / 255.f,
-                            1.f);
+                    const SDL_PixelFormatDetails* format_details = SDL_GetPixelFormatDetails(surface->format);
+                    Uint32 mapped_color = SDL_MapRGBA(
+                            format_details,
+                            nullptr,
+                            color->Red,
+                            color->Green,
+                            color->Blue,
+                            255);
+                    SDL_FillSurfaceRect(surface, &previous_frame_rect, mapped_color);
                 }
                 break;
             }
             case DISPOSE_DO_NOT:
+                // Do nothing, the previous frame is kept.
+                break;
+            case DISPOSAL_UNSPECIFIED:
+            default: // DISPOSE_NONE
+                // Do nothing, just overwrite the previous frame.
                 break;
         }
 
-        // gif->frame is 8-bit indexed, so we have to convert to RGBA8888
+        // Get the dimensions and position of the current frame.
         left = frame->ImageDesc.Left;
         top = frame->ImageDesc.Top;
         width = frame->ImageDesc.Width;
@@ -1184,47 +1589,65 @@ public:
 
         transparent_color = frame_info->transparent_color_index;
 
+        // Pre-calculate the palette colors for the current frame to optimize the rendering loop.
+        vector<Uint32> palette_colors(color_map->ColorCount);
+        const SDL_PixelFormatDetails* format_details = SDL_GetPixelFormatDetails(surface->format);
+        for (int i = 0; i < color_map->ColorCount; i++)
+        {
+            if (i == transparent_color) {
+                // Set the transparent color to have an alpha of 0 (values of R, G, B don't matter, since alpha is zero).
+                palette_colors[i] = 0;
+            } else {
+                // Set the other colors with an alpha of 255 (fully opaque).
+                palette_colors[i] = SDL_MapRGBA(
+                        format_details,
+                        nullptr,
+                        color_map->Colors[i].Red,
+                        color_map->Colors[i].Green,
+                        color_map->Colors[i].Blue,
+                        255);
+            }
+        }
+
+        // Lock the surface to directly access the pixels.
         SDL_LockSurface(surface);
+        // Iterate over the pixels of the current frame and update the surface.
         for (int i = 0; i < height; i++)
         {
             addr = (Uint32*)(void*)((Uint8*)surface->pixels + (i + top) * surface->pitch) + left;
             for (int j = 0; j < width; j++)
             {
                 int color_index = *raster_bits++;
-
-                if (transparent_color == NO_TRANSPARENT_COLOR || transparent_color != color_index)
+                if (color_index < color_map->ColorCount)
                 {
-                    GifColorType *color;
-
-                    if (color_index < color_map->ColorCount)
-                    {
-                        color = &color_map->Colors[color_index];
-                        pixel = SDL_MapSurfaceRGB(
-                                surface,
-                                color->Red,
-                                color->Green,
-                                color->Blue);
-                        *addr = pixel;
-                    }
+                    // Only draw the pixel if it is not transparent.
+                    Uint32 color = palette_colors[color_index];
+                    if (color) *addr = color;
                 }
+
                 addr++;
             }
         }
         SDL_UnlockSurface(surface);
 
+        // Destroy the old texture and create a new one from the updated surface.
         if (frame_info->texture)
         {
             SDL_DestroyTexture(frame_info->texture);
             frame_info->texture = (SDL_Texture *)nullptr;
             frame_info->texture_outdated = true;
         }
-        texture = SDL_CreateTextureFromSurface(renderer, surface);
+        texture = SDL_CreateTextureFromSurface(const_cast<SDL_Renderer*>(renderer), surface);
+        // If caching is enabled, store the new texture.
         if (cache_frames)
         {
             frame_info->texture = texture;
             frame_info->texture_outdated = false;
         }
 
+        // Store the rectangle of the current frame for the next iteration.
+        previous_frame_rect = {left, top, width, height};
+        // Store the disposal method of the current frame for the next iteration.
         recent_disposal = frame_info->disposal_mode;
     }
 
@@ -1352,11 +1775,14 @@ SDL_AppResult SDL_AppInit(
         return app_init_failed();
     }
 
+    // Create the line object
+    screen_objects_add_lines(app);
+
     // Initialize screen objects
     init_screen_objects(app, objects);
 
     // If no screen objects defined in settings file, create two default objects
-    if (app->screen_objects.empty())
+    if (app->screen_objects.size() <= 1)
     {
         float x_pos = (float) app->work_area.x + (float) (app->work_area.w * 5.0 / 6.0);
         float y_pos = (float) app->work_area.y + (float) (app->work_area.h * 1.0 / 5.0);
@@ -1369,7 +1795,7 @@ SDL_AppResult SDL_AppInit(
                 app->logo_scale,
                 0.0,
                 false,
-                255,
+                1.f,
                 app->renderer);
         app->screen_objects.push_back(image);
 
@@ -1384,7 +1810,7 @@ SDL_AppResult SDL_AppInit(
                 app->base_path,
                 app->text_scale,
                 app->text_rotate,
-                255,
+                1.f,
                 app->renderer);
         app->screen_objects.push_back(text);
 
@@ -1467,7 +1893,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         draw(app);
     }
 
-    if (app->line_dashed && app->line_dashed_gap > 0 && app->line_width > 0 && !app->hidden)
+    auto *line_object = dynamic_cast<LineObject *>(app->screen_objects[0]);
+    if (line_object && line_object->dashed && line_object->dashed_gap > 0 && line_object->width > 0 && !app->hidden)
     {
         Sint64 delay = (Sint64)(ticks - app->idle_ticks);
 
@@ -1547,11 +1974,27 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event)
         }
     }
 
-    for (auto it=app->screen_objects.begin(); it!=app->screen_objects.end(); ++it)
-    {
-        int needs_update = 0;
+    ScreenObject* line_object = nullptr;
+    bool event_handled = false;
 
+    // Find the LineObject
+    for (auto& obj : app->screen_objects)
+    {
+        if (strcmp(obj->type_name(), "Lines") == 0)
+        {
+            line_object = obj;
+            break;
+        }
+    }
+
+    // Handle events for all objects except LineObject
+    for (auto it = app->screen_objects.begin(); it != app->screen_objects.end(); ++it)
+    {
+        if (*it == line_object) continue;
+
+        int needs_update = 0;
         if ((*it)->handle_event(event, needs_update, app))
+        
         {
             if (needs_update >= UPDATE_VIEW_CHANGED)
             {
@@ -1562,7 +2005,26 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event)
                 app->is_virgin = false;
             }
             event->type = SDL_EVENT_LAST;
+            event_handled = true;
             break;
+        }
+    }
+
+    // If no other object handled the event, handle it for the LineObject
+    if (!event_handled && line_object)
+    {
+        int needs_update = 0;
+        if (line_object->handle_event(event, needs_update, app))
+        {
+            if (needs_update >= UPDATE_VIEW_CHANGED)
+            {
+                app->needs_redraw = true;
+            }
+            if (needs_update >= UPDATE_SETTINGS_CHANGED)
+            {
+                app->is_virgin = false;
+            }
+            event->type = SDL_EVENT_LAST;
         }
     }
 
@@ -1598,12 +2060,12 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event)
         {
             if (event->wheel.y < 0)
             {
-                app->alpha = SDL_max(0, app->alpha - 5);
+                app->alpha = SDL_max(0, app->alpha - 5.f / 255.f);
                 app->is_virgin = false;
             }
             else
             {
-                app->alpha = SDL_min(255, app->alpha + 5);
+                app->alpha = SDL_min(1.f, app->alpha + 5.f / 255.f);
                 app->is_virgin = false;
             }
             app->needs_redraw = true;
@@ -1620,68 +2082,26 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event)
 
     else if (event->type == SDL_EVENT_KEY_DOWN)
     {
-        COLORREF color;
-
         app->needs_redraw = true;
 
-        if (color_from_key((int)event->key.key, color))
+        if (event->key.key == SDLK_LEFT)
         {
-            app->line_color = (COLORREF) color;
-            app->is_virgin = false;
-        }
-        else if (event->key.key == SDLK_LEFT)
-        {
-            app->alpha = SDL_max(0, app->alpha - 17);
+            app->alpha = SDL_max(0, app->alpha - 17.f / 255.f);
             app->is_virgin = false;
         }
         else if (event->key.key == SDLK_RIGHT)
         {
-            app->alpha = SDL_min(255, app->alpha + 17);
+            app->alpha = SDL_min(1.f, app->alpha + 17.f / 255.f);
             app->is_virgin = false;
         }
         else if (event->key.key == SDLK_X)
         {
             app->app_quit = SDL_APP_SUCCESS;
         }
-        else if (event->key.key == SDLK_0)
-        {
-            app->line_width = 0;
-            app->is_virgin = false;
-        }
-        else if (event->key.key == SDLK_1)
-        {
-            app->line_width = 1;
-            app->is_virgin = false;
-        }
-        else if (event->key.key == SDLK_2)
-        {
-            app->line_width = 2;
-            app->is_virgin = false;
-        }
-        else if (event->key.key == SDLK_3)
-        {
-            app->line_width = 3;
-            app->is_virgin = false;
-        }
-        else if (event->key.key == SDLK_4)
-        {
-            app->line_width = 4;
-            app->is_virgin = false;
-        }
-        else if (event->key.key == SDLK_5)
-        {
-            app->line_width = 5;
-            app->is_virgin = false;
-        }
         else if ((event->key.key == SDLK_SPACE) or (event->key.key == SDLK_RETURN))
         {
             app->layout_mode = !app->layout_mode;
             update_layout_mode(app);
-        }
-        else if (event->key.key == SDLK_D)
-        {
-            app->line_dashed = !app->line_dashed;
-            app->is_virgin = false;
         }
         else if (event->key.key == SDLK_H)
         {
@@ -1837,6 +2257,27 @@ void init_screen_objects(AppContext* app, json &objects) {
                          app->base_path,
                          app->renderer);
             }
+            else if (object["type"] == "Lines")
+            {
+                // Find the existing LineObject and update its properties
+                for (auto& existing_obj : app->screen_objects) {
+                    if (strcmp(existing_obj->type_name(), "Lines") == 0) {
+                        auto lines = dynamic_cast<LineObject*>(existing_obj);
+                        if (lines) {
+                            lines->alpha = (float)object.value("alpha", 0.55f);
+                            lines->width = object.value("width", 1);
+                            lines->color = get_color_value(object, "color", 0x000000);
+                            lines->dashed = object.value("dashed", true);
+                            lines->dashed_len = object.value("dashed_len", 10);
+                            lines->dashed_gap = object.value("dashed_gap", 10);
+                            lines->line_angle = object.value("line_angle", 45.f);
+                            lines->line_spacing = object.value("line_spacing", 15.f);
+                        }
+                        break;
+                    }
+                }
+                obj = nullptr; // Don't add a new object
+            }
             else if (object["type"] == "Image")
             {
                 obj = new Image(
@@ -1858,6 +2299,18 @@ void init_screen_objects(AppContext* app, json &objects) {
 }
 
 
+bool screen_objects_add_lines(AppContext *app)
+{
+    ScreenObject *obj = new LineObject(app->work_area, app->idle_ticks);
+
+    app->screen_objects.push_back(obj);
+    app->is_virgin = false;
+    app->needs_redraw = true;
+
+    return true;
+}
+
+
 bool screen_objects_add_text(float x, float y, const char* text, AppContext *app)
 {
     ScreenObject *obj = new Signature(
@@ -1870,7 +2323,7 @@ bool screen_objects_add_text(float x, float y, const char* text, AppContext *app
         app->base_path,
         1.f,
         0.f,
-        255,
+        1.f,
         app->renderer);
 
     app->screen_objects.push_back(obj);
@@ -1911,7 +2364,7 @@ bool screen_objects_add_image(float x, float y, const char *full_path_name, AppC
                         fullpath.filename().string(),
                         fullpath.parent_path().string(),
                         1.f, 0.f, false,
-                        255,
+                        1.f,
                         true,
                         app->renderer);
 
@@ -1933,7 +2386,7 @@ bool screen_objects_add_image(float x, float y, const char *full_path_name, AppC
                         fullpath.filename().string(),
                         fullpath.parent_path().string(),
                         1.f, 0.f, false,
-                        255,
+                        1.f,
                         app->renderer);
 
                 if (obj && !obj->valid())
@@ -2010,175 +2463,94 @@ void free_screen_objects(AppContext* app)
 }
 
 
+// Implements a Bresenham-like line drawing algorithm with dashing capabilities.
+// This function draws a line between two points (x1, y1) and (x1 + dx, y1 + dy)
+// on a given SDL_Surface. It supports dashed lines with configurable dash and gap lengths.
 void draw_line_bresenham(
-        int x1, int y1,
-        int dx, int dy,
-        int dash_len, int gap_len,
-        void *color,
-        SDL_Surface* surface)
+        int x1, int y1, // Starting coordinates of the line segment
+        int dx, int dy, // Differences in x and y coordinates (length of the segment)
+        int dash_len,   // Length of a dash in pixels
+        int gap_len,    // Length of a gap in pixels
+        int dash_offset,// Starting offset for the dashing pattern
+        void *color,    // Pointer to the color data to be used for drawing
+        SDL_Surface* surface) // The target surface to draw on
 {
+    // Return immediately if the surface or color is invalid.
     if (!surface || !color) return;
 
-    int sx = (dx >= 0) ? 1 : -1;
-    int sy = (dy >= 0) ? 1 : -1;
-    int err = dx - dy;
-    int bpp = 4;
-    int pitch = surface->pitch;
-    void *addr = nullptr;
-    int n = 10000;
-    int i = dist(gen) % (dash_len + gap_len);
+    // Determine the direction of the line in x and y axes.
+    int sx = (dx >= 0) ? 1 : -1; // x-step: 1 for right, -1 for left
+    int sy = (dy >= 0) ? 1 : -1; // y-step: 1 for down, -1 for up
 
+    // Initialize error term for Bresenham's algorithm.
+    // This helps decide when to step in the y direction.
+    int err = dx - dy;
+
+    // Get bytes per pixel and pitch (row length in bytes) from the surface.
+    int bpp = 4; // Assuming RGBA8888 format (4 bytes per pixel)
+    int pitch = surface->pitch;
+
+    // Pointer to the current pixel address on the surface.
+    void *addr = nullptr;
+
+    // Loop counter to prevent infinite loops for very long lines or zero-length segments.
+    int n = 10000; // Max number of pixels to draw (safety limit)
+
+    // Current position in the dash/gap pattern.
+    int i = dash_offset;
+
+    // Take absolute values of dx and dy for the algorithm.
     dx = SDL_abs(dx);
     dy = SDL_abs(dy);
 
+    // Main loop for Bresenham's algorithm.
     while (n--)
     {
-        int e2;
+        int e2; // Error term multiplied by 2 for integer arithmetic
 
+        // Increment dash/gap counter.
         i++;
 
+        // Check if the current pixel is within the bounds of the surface.
         if (y1 >= 0 && y1 < surface->h && x1 >= 0 && x1 < surface->w)
         {
+            // If the address has not been initialized yet, calculate it.
             if (!addr)
             {
                 addr = (Uint8 *)surface->pixels + y1 * pitch + x1 * bpp;
             }
+            // Check if the current segment should be a dash (not a gap).
+            // If gap_len is 0, it's a solid line, so always draw.
             if (gap_len == 0 || i % (gap_len + dash_len) < dash_len)
             {
+                // Copy the color data to the current pixel.
                 memcpy(addr, color, bpp);
             }
         }
         else
         {
+            // If we are outside the surface and have already drawn some pixels,
+            // we can stop drawing. This prevents drawing lines far off-screen.
             if (addr) break;
         }
 
+        // Calculate 2 * error for the next step.
         e2 = 2 * err;
-        if (e2 > -dy)
+
+        // Determine whether to step in x, y, or both.
+        if (e2 > -dy) // If error is still positive, step in x direction.
         {
-            err -= dy;
-            x1 += sx;
-            if (addr) addr = (Uint8 *)addr + sx * bpp;
+            err -= dy; // Update error term.
+            x1 += sx;  // Move to the next pixel in x direction.
+            if (addr) addr = (Uint8 *)addr + sx * bpp; // Update pixel address if applicable.
         }
-        if (e2 < dx)
+        if (e2 < dx) // If error is still negative, step in y direction.
         {
-            err += dx;
-            y1 += sy;
-            if (addr) addr = (Uint8 *)addr + sy * pitch;
-        }
-    }
-}
-
-
-void draw_lines(AppContext* app)
-{
-    int width = app->work_area.w;
-    int height = app->work_area.h;
-    int dash_len = app->line_dashed_len;
-    int gap_len = app->line_dashed ? app->line_dashed_gap : 0;
-    int slope_dx = app->line_slope_dx;
-    int slope_dy = app->line_slope_dy;
-    Uint32 pixel;
-    SDL_FRect rect = {0, 0, (float)width, (float)height};
-    SDL_Point extent;
-    SDL_Surface *surface;
-    SDL_Texture *texture;
-    int negative_slope = false;
-    int jitter = 0;
-
-    gen.seed((unsigned)app->idle_ticks);
-
-    surface = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA8888);
-    SDL_ClearSurface(surface, 0, 0, 0, 0);
-
-    pixel = SDL_MapSurfaceRGBA(
-                surface,
-                GetRValue(app->line_color),
-                GetGValue(app->line_color),
-                GetBValue(app->line_color),
-                app->alpha);
-
-    if (slope_dy < 0)
-    {
-        slope_dy = -slope_dy;
-        slope_dx = -slope_dx;
-    }
-    if (slope_dx < 0)
-    {
-        negative_slope = true;
-        slope_dx = -slope_dx;
-    }
-
-    if (app->line_dashed)
-    {
-        jitter = SDL_min(
-                    slope_dx ? slope_dx : slope_dy,
-                    slope_dy ? slope_dy : slope_dx);
-    }
-
-    if (slope_dx > slope_dy)
-    {
-        extent = {(width + height), (int)((float)(width + height) * (float)slope_dy / (float)slope_dx)};
-    }
-    else
-    {
-        extent = {(int)((float)(width + height) * (float)slope_dx / (float)slope_dy), (width + height)};
-    }
-
-    SDL_LockSurface(surface);
-    int j = jitter ? dist(gen) % jitter : 0;
-    for (int d = j; d < j + app->line_width; d++)
-    {
-        if (slope_dx == 0)
-        {
-            for (int y = d; y < height; y += slope_dy)
-            {
-                draw_line_bresenham(0, y + d, 1, 0, dash_len, gap_len, &pixel, surface);
-            }
-        }
-        else if (slope_dy == 0)
-        {
-            for (int x = 0; x < width; x += slope_dx)
-            {
-                draw_line_bresenham(x + d, 0, 0, 1, dash_len, gap_len, &pixel, surface);
-            }
-        }
-        else
-        {
-            if (slope_dx <= slope_dy)
-            {
-                int y1 = height, dy = -slope_dy;
-                if (negative_slope)
-                {
-                    y1 = 0;
-                    dy = slope_dy;
-                }
-                for (int x = -extent.x; x < width; x += slope_dx)
-                {
-                    draw_line_bresenham(x + d, y1, slope_dx, dy, dash_len, gap_len, &pixel, surface);
-                }
-            }
-            else
-            {
-                int x1 = width, dx = -slope_dx;
-                if (negative_slope)
-                {
-                    x1 = 0;
-                    dx = slope_dx;
-                }
-                for (int y = -extent.y; y < height; y += slope_dy)
-                {
-                    draw_line_bresenham(x1, y + d, dx, slope_dy, dash_len, gap_len, &pixel, surface);
-                }
-            }
+            err += dx; // Update error term.
+            y1 += sy;  // Move to the next pixel in y direction.
+            if (addr) addr = (Uint8 *)addr + sy * pitch; // Update pixel address if applicable.
         }
     }
-    SDL_UnlockSurface(surface);
-
-    texture = SDL_CreateTextureFromSurface(app->renderer, surface);
-    SDL_RenderTexture(app->renderer, texture, nullptr, &rect);
-    SDL_DestroyTexture(texture);
-    SDL_DestroySurface(surface);
 }
 
 
@@ -2193,10 +2565,6 @@ void draw(AppContext* app)
     SDL_RenderClear(app->renderer);
 
     if (!app->hidden) {
-        if (app->line_width > 0 && !app->mouse_capture) {
-            draw_lines(app);
-        }
-
         for (auto it = app->screen_objects.begin(); it != app->screen_objects.end(); ++it) {
             if (*it == app->mouse_capture) {
                 SDL_FPoint pt;
@@ -2332,7 +2700,7 @@ void settings_write(AppContext* app)
     ordered_json j = {
         {"info", {
                 {"description", "Dragon setup file"},
-                {"version", version},
+                {"version", "0.4"},
                 {"url", "https://github.com/a-ma72/dragon"},
                 {"license", "BSD-2 clause"},
                 {"comment_1", "This file contains the settings for the Dragon application."},
@@ -2347,15 +2715,9 @@ void settings_write(AppContext* app)
         },
         {"crop_bottom", (int)app->crop_bottom},
         {"hidden", (bool)app->hidden},
-        {"alpha", (int)app->alpha},
+        {"alpha", round_to_precision(app->alpha, 2)},
         {"idle_delay_ms", (int)app->idle_delay_ms},
-        {"line_width", (int)app->line_width},
-        {"line_color", int_to_hex_color(app->line_color)},
-        {"line_dashed", (bool)app->line_dashed},
-        {"line_dashed_len", (int)app->line_dashed_len},
-        {"line_dashed_gap", (int)app->line_dashed_gap},
-        {"line_slope_dx", (int)app->line_slope_dx},
-        {"line_slope_dy", (int)app->line_slope_dy},
+
         {"text_file_name", app->text_file_name},
         {"text_content", app->text_content},
         {"text_font_name", app->text_font_name},
@@ -2363,10 +2725,10 @@ void settings_write(AppContext* app)
         {"text_font_size", round_to_precision(app->text_font_size, 1)},
         {"text_scale", round_to_precision(app->text_scale, 4)},
         {"text_rotate", round_to_precision(app->text_rotate, 4)},
-        {"text_alpha", (int)app->text_alpha},
+        {"text_alpha", round_to_precision(app->text_alpha, 2)},
         {"logo_file_name", app->logo_file_name},
         {"logo_scale", round_to_precision(app->logo_scale, 4)},
-        {"logo_alpha", (int)app->logo_alpha},
+        {"logo_alpha", round_to_precision(app->logo_alpha, 2)},
     };
 
     json objects = json::array();
@@ -2400,13 +2762,9 @@ void settings_write(AppContext* app)
 bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 {
     app->crop_bottom = 0;  // j.value("task_bar_height", app->crop_bottom);
-    app->alpha = j.value("alpha", app->alpha);
+    app->alpha = j.value("alpha", app->alpha * 255.f) / 255.f;
     app->hidden = (bool)j.value("hidden", 0);
-    app->line_width = j.value("line_width", app->line_width);
-    app->line_color = get_color_value(j, "line_color", app->line_color);
-    app->line_dashed = j.value("line_dashed", app->line_dashed);
-    app->line_dashed_gap = j.value("line_dashed_gap", app->line_dashed_gap);
-    app->line_dashed_len = j.value("line_dashed_len", app->line_dashed_len);
+
     app->logo_file_name = j.value("logo_filename", app->logo_file_name);
     app->logo_scale = j.value("logo_scale", app->logo_scale);
     app->text_content = j.value("text_content", app->text_content);
@@ -2458,28 +2816,67 @@ bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 
 bool settings_read_v0_3(AppContext* app, json &j, json &objects)
 {
-    if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != version)
+	if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != "0.3")
+	{
+		return false;
+	}
+
+	app->screen_rect_init = SDL_Rect(
+		j["screen_rect_init"][0],
+		j["screen_rect_init"][1],
+		j["screen_rect_init"][2],
+		j["screen_rect_init"][3]
+	);
+	app->crop_bottom = j.value("crop_bottom", app->crop_bottom);
+	app->alpha = j.value("alpha", app->alpha * 255.f) / 255.f;
+	app->hidden = j.value("hidden", false);
+	app->idle_delay_ms = j.value("idle_delay_ms", app->idle_delay_ms);
+
+	app->logo_file_name = j.value("logo_file_name", app->logo_file_name);
+	app->logo_scale = j.value("logo_scale", app->logo_scale);
+	app->logo_alpha = j.value("logo_alpha", app->logo_alpha);
+	app->text_content = j.value("text_content", app->text_content);
+	app->text_file_name = j.value("text_file_name", app->text_file_name);
+	app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
+	app->text_font_name = j.value("text_font_name", app->text_font_name);
+	app->text_font_size = j.value("text_font_size", app->text_font_size);
+	app->text_rotate = j.value("text_rotate", app->text_rotate);
+	app->text_scale = j.value("text_scale", app->text_scale);
+	app->text_alpha = j.value("text_alpha", app->text_alpha);
+
+    if (j.contains("objects"))
+    {
+        for (auto & obj : j["objects"])
+        {
+            if (obj.contains("alpha") && obj["alpha"].is_number_integer())
+            {
+                obj["alpha"] = (float)obj["alpha"].get<int>() / 255.f;
+            }
+        }
+        objects = j["objects"];
+    }
+	return true;
+}
+
+
+bool settings_read_v0_4(AppContext* app, json &j, json &objects)
+{
+    if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != "0.4")
     {
         return false;
     }
 
     app->screen_rect_init = SDL_Rect(
-            j["screen_rect_init"][0],
-            j["screen_rect_init"][1],
-            j["screen_rect_init"][2],
-            j["screen_rect_init"][3]
+        j["screen_rect_init"][0],
+        j["screen_rect_init"][1],
+        j["screen_rect_init"][2],
+        j["screen_rect_init"][3]
     );
     app->crop_bottom = j.value("crop_bottom", app->crop_bottom);
     app->alpha = j.value("alpha", app->alpha);
     app->hidden = j.value("hidden", false);
     app->idle_delay_ms = j.value("idle_delay_ms", app->idle_delay_ms);
-    app->line_width = j.value("line_width", app->line_width);
-    app->line_color = get_color_value(j, "line_color", app->line_color);
-    app->line_dashed = j.value("line_dashed", app->line_dashed);
-    app->line_dashed_gap = j.value("line_dashed_gap", app->line_dashed_gap);
-    app->line_dashed_len = j.value("line_dashed_len", app->line_dashed_len);
-    app->line_slope_dx = j.value("line_slope_dx", app->line_slope_dx);
-    app->line_slope_dy = j.value("line_slope_dy", app->line_slope_dy);
+
     app->logo_file_name = j.value("logo_file_name", app->logo_file_name);
     app->logo_scale = j.value("logo_scale", app->logo_scale);
     app->logo_alpha = j.value("logo_alpha", app->logo_alpha);
@@ -2492,7 +2889,7 @@ bool settings_read_v0_3(AppContext* app, json &j, json &objects)
     app->text_scale = j.value("text_scale", app->text_scale);
     app->text_alpha = j.value("text_alpha", app->text_alpha);
 
-    if (j.contains("objects")) objects = j["objects"];
+	if (j.contains("objects")) objects = j["objects"];
 
     return true;
 }
@@ -2521,6 +2918,7 @@ bool settings_read(AppContext* app, json &objects)
             file >> j;
 
             if (
+                !settings_read_v0_4(app, j, objects) &&
                 !settings_read_v0_3(app, j, objects) &&
                 !settings_read_v0_2(app, j, objects)
             )

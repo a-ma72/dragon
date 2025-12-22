@@ -25,14 +25,14 @@ The application has two states:
 
 You can toggle between the modes using the `space bar` or the `return key`.
 
-On first launch, if no settings file exists, one signature and one logo object will be created as examples. 
-Upon quitting the application, a settings file is saved in the program directory.  
+When starting for the first time, if no settings file exists, a signature and a logo object are created as examples.
+When exiting the application, a settings file is saved in the program directory.  
 
 The settings file contains all configuration values in JSON format and can also be edited manually.  
 
-Placeable objects (signatures and logos) can be freely added to the "objects" list in the settings file. 
-Supported logo image formats are SVG, PNG, BMP, JPG, Webp, TIF, and GIF. For GIFs, only the first frame is 
-shown by default. To enable animation, set the object's "type" in the settings file from "Image" to "AnimatedGif".  
+Placeable objects can be freely added to the "objects" list in the settings file. 
+Supported logo image formats are SVG, PNG, BMP, JPG, Webp, TIF, and GIF. 
+To show the first frame for GIFs only, change the object's "type" in the settings file from "AnimatedGif" to "Image".  
 The `image_full_path` refers to the fully resolved location of the image, or relative to the current path from 
 where the program was started. Missing parameters are filled with standard values, if possible.
 
@@ -45,24 +45,24 @@ Keyboard shortcuts (application must have focus):
 Space / Return                    - Toggle between layout and 
                                     shielding mode
 0..5                              - Adjust diagonal line width (0 = off)
-R G B S K W (layout mode)         - Change color of diagonal lines, 
-                                    signature, or logo
+R G B S K W (layout mode)         - Change color of diagonal lines or
+                                    signatures
 D                                 - Toggle between dashed and solid lines
 H                                 - Toggle visibility of overlay ("dragon")
-F (layout mode)                   - Flip logo horizontally
+F (layout mode)                   - Flip images horizontally
 X                                 - Quit application (and save settings)
 Arrow Left / Right                - Adjust global transparency
 Mouse Wheel (layout mode)         - Adjust transparency global or for
-                                    logo or signature
-Shift + Mouse Wheel (layout mode) - Scale logo or signature
-Ctrl + Mouse Wheel (layout mode)  - Rotate logo or signature
-Ctrl + V                          - Paste raw text or an image file reference
-                                    (copied in Windows Explorer) from the
-                                    clipboard
+                                    screen objects
+Shift + Mouse Wheel (layout mode) - Scale screen objects
+Ctrl + Mouse Wheel (layout mode)  - Rotate screen objects
+Ctrl + V                          - Paste raw text from clipboard, or
+                                    paste one or multiple image file(s) from
+                                    clipboard (copied in Windows Explorer)
 
 Win + Shift + Arrow Left/Right    - Move overlay to another screen
 
-(To modify (scale, rotate, fade) the logo or signature, position the 
+(To modify (scale, rotate, fade) screen objects, position the 
 mouse cursor over the respective object.)
 ```
 
@@ -80,9 +80,7 @@ Settings
 - `crop_bottom`  
   crops the work areas bottom further.  
 - `alpha`  
-  has a value range from 0 (fully transparent) to 255 (opaque).  
-- `line_slope_dx` and `line_slope_dy`  
-  set the orientation of the lines. The smaller (non-null) value defines the space between the lines.  
+  has a value range from 0.0 (fully transparent) to 1.0 (opaque).  
 - `idle_delay_ms`  
   defines the refresh rate for dashed lines.  
 
