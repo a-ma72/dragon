@@ -2,6 +2,7 @@
 
 #define _USE_MATH_DEFINES
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <string_view>
 #include <fstream>
@@ -22,7 +23,7 @@
 #include "json.hpp"
 #include "gif_lib.h"
 
-extern "C" const char *version = "0.4";
+extern "C" const char *version = "0.5";
 extern "C" const char *signature = "Dragon Signature";
 
 using std::string;
@@ -728,9 +729,9 @@ protected:
                 font,
                 signature.c_str(), signature.length(),
                 SDL_Color(
-                        GetBValue(font_color),
-                        GetGValue(font_color),
                         GetRValue(font_color),
+                        GetGValue(font_color),
+                        GetBValue(font_color),
                         (int)(alpha * 255.f))
             );
             if (!surface) break;
@@ -1364,10 +1365,12 @@ public:
 
     ~AnimatedGif() override
     {
-        invalidate(true);
-        SDL_DestroyTexture(texture);
-        SDL_DestroySurface(surface);
-        if (gif) DGifCloseFile(gif, nullptr);
+        invalidate(true); // cached frames only; Image owns surface/texture
+        if (gif)
+        {
+            DGifCloseFile(gif, nullptr);
+            gif = nullptr;
+        }
     }
 
 protected:
@@ -1653,17 +1656,17 @@ public:
 
     void invalidate(bool remove = false)
     {
-        for (auto info : frame_info)
+        for (auto &info : frame_info)
         {
             info.texture_outdated = true;
-            if (remove)
+            if (remove && info.texture)
             {
-                SDL_DestroyTexture(info.texture);
                 if (texture == info.texture)
                 {
-                    texture = (SDL_Texture *)nullptr;
+                    texture = nullptr;
                 }
-                info.texture = (SDL_Texture *)nullptr;
+                SDL_DestroyTexture(info.texture);
+                info.texture = nullptr;
             }
         }
     }
@@ -2624,7 +2627,6 @@ bool color_from_key(int key, COLORREF &color)
         };
 
         color = color_map[strchr(color_keys, key) - color_keys];
-        color = RGB(GetRValue(color), GetGValue(color), GetBValue(color));  // (SDL sort order)
         return true;
     }
     return false;
@@ -2647,7 +2649,7 @@ COLORREF hex_color_to_int(const string& hex)
     Uint32 g = std::stoi(hex.substr(3, 2), nullptr, 16);
     Uint32 b = std::stoi(hex.substr(5, 2), nullptr, 16);
 
-    return (r << 16) | (g << 8) | b;  // Pack RGB as COLORREF
+    return RGB((BYTE)r, (BYTE)g, (BYTE)b);
 }
 
 
@@ -2676,13 +2678,15 @@ COLORREF get_color_value(const json& j, const string& key, COLORREF default_valu
 // Converts COLORREF to "#RRGGBB" string
 string int_to_hex_color(COLORREF color)
 {
-    if (color < 0x000000 || color > 0xFFFFFF) {
-        throw std::out_of_range("Color integer out of RGB bounds (0x000000 to 0xFFFFFF)");
-    }
-
-    std::ostringstream oss;
-    oss << '#' << std::uppercase << std::setfill('0') << std::setw(6) << std::hex << (color & 0xFFFFFF);
-    return oss.str();
+    char buf[8];
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "#%02X%02X%02X",
+        GetRValue(color),
+        GetGValue(color),
+        GetBValue(color));
+    return buf;
 }
 
 
@@ -2700,7 +2704,7 @@ void settings_write(AppContext* app)
     ordered_json j = {
         {"info", {
                 {"description", "Dragon setup file"},
-                {"version", "0.4"},
+                {"version", "0.5"},
                 {"url", "https://github.com/a-ma72/dragon"},
                 {"license", "BSD-2 clause"},
                 {"comment_1", "This file contains the settings for the Dragon application."},
@@ -2861,7 +2865,12 @@ bool settings_read_v0_3(AppContext* app, json &j, json &objects)
 
 bool settings_read_v0_4(AppContext* app, json &j, json &objects)
 {
-    if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != "0.4")
+    if (!j.contains("info") || !j["info"].contains("version"))
+    {
+        return false;
+    }
+    const string ver = j["info"]["version"];
+    if (ver != "0.4" && ver != "0.5")
     {
         return false;
     }
