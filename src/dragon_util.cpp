@@ -104,6 +104,61 @@ bool path_has_gif_extension(std::string_view path)
     return lower_copy(path).ends_with(".gif");
 }
 
+static size_t path_last_separator(std::string_view path)
+{
+    const size_t slash = path.find_last_of('/');
+    const size_t bslash = path.find_last_of('\\');
+    if (slash == std::string_view::npos) return bslash;
+    if (bslash == std::string_view::npos) return slash;
+    return slash > bslash ? slash : bslash;
+}
+
+std::string path_filename_utf8(std::string_view path)
+{
+    const size_t sep = path_last_separator(path);
+    if (sep == std::string_view::npos) return std::string(path);
+    return std::string(path.substr(sep + 1));
+}
+
+std::string path_parent_utf8(std::string_view path)
+{
+    const size_t sep = path_last_separator(path);
+    if (sep == std::string_view::npos) return {};
+    if (sep == 0) return std::string(path.substr(0, 1));
+    return std::string(path.substr(0, sep));
+}
+
+std::string path_join_utf8(std::string_view dir, std::string_view name)
+{
+    if (dir.empty()) return std::string(name);
+    if (name.empty()) return std::string(dir);
+    const char last = dir.back();
+    if (last == '/' || last == '\\')
+    {
+        return std::string(dir) + std::string(name);
+    }
+    return std::string(dir) + '\\' + std::string(name);
+}
+
+bool path_is_absolute_utf8(std::string_view path)
+{
+    if (path.empty()) return false;
+    if (path[0] == '/' || path[0] == '\\') return true;
+    if (path.size() >= 2 && path[1] == ':' &&
+        ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')))
+    {
+        return true;
+    }
+    return false;
+}
+
+std::string path_resolve_utf8(std::string_view base, std::string_view path)
+{
+    if (path.empty()) return {};
+    if (path_is_absolute_utf8(path)) return std::string(path);
+    return path_join_utf8(base, path);
+}
+
 bool path_has_image_extension(std::string_view path)
 {
     const std::string buffer = lower_copy(path);

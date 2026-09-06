@@ -19,6 +19,11 @@ void gif_build_row_map(int height, bool interlace, std::vector<int> &dest_rows);
 
 bool path_has_gif_extension(std::string_view path);
 bool path_has_image_extension(std::string_view path);
+std::string path_filename_utf8(std::string_view path);
+std::string path_parent_utf8(std::string_view path);
+std::string path_join_utf8(std::string_view dir, std::string_view name);
+bool path_is_absolute_utf8(std::string_view path);
+std::string path_resolve_utf8(std::string_view base, std::string_view path);
 
 int gif_frame_delay_ms(int delay_cs);
 

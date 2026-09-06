@@ -138,6 +138,22 @@ static void test_image_extensions()
     EXPECT(path_has_image_extension("scan.tiff"));
     EXPECT(!path_has_image_extension("notes.txt"));
     EXPECT(!path_has_gif_extension("logo.png"));
+
+    EXPECT(path_filename_utf8("C:\\Users\\x\\logo.png") == "logo.png");
+    EXPECT(path_parent_utf8("C:\\Users\\x\\logo.png") == "C:\\Users\\x");
+    EXPECT(path_join_utf8("C:\\Users\\x", "logo.png") == "C:\\Users\\x\\logo.png");
+    EXPECT(path_filename_utf8("logo.png") == "logo.png");
+    EXPECT(path_parent_utf8("logo.png").empty());
+    EXPECT(path_join_utf8("C:\\Users\\x\\", "logo.png") == "C:\\Users\\x\\logo.png");
+    EXPECT(path_filename_utf8("C:/Users/x/logo.png") == "logo.png");
+
+    EXPECT(path_is_absolute_utf8("C:\\Users\\x\\logo.png"));
+    EXPECT(path_is_absolute_utf8("\\\\server\\share\\logo.png"));
+    EXPECT(path_is_absolute_utf8("/tmp/logo.png"));
+    EXPECT(!path_is_absolute_utf8("logo.png"));
+    EXPECT(!path_is_absolute_utf8("images/logo.png"));
+    EXPECT(path_resolve_utf8("C:\\app", "logo.png") == "C:\\app\\logo.png");
+    EXPECT(path_resolve_utf8("C:\\app", "D:\\pic.png") == "D:\\pic.png");
 }
 
 static void test_settings_version_dispatch()
