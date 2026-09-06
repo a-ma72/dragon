@@ -96,4 +96,4 @@ The package contains files:
 - app.png
 
 ---
-2025, A. Martin
+2026, A. Martin

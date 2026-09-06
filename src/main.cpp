@@ -1,4 +1,4 @@
-// 2025, A. Martin
+// 2026, A. Martin
 
 #define _USE_MATH_DEFINES
 #include <cmath>
@@ -22,6 +22,7 @@
 #include <windows.h>
 #include "json.hpp"
 #include "gif_lib.h"
+#include "dragon_util.h"
 
 extern "C" const char *version = "0.5";
 extern "C" const char *signature = "Dragon Signature";
@@ -72,6 +73,8 @@ void settings_write(AppContext* app);
 bool settings_read_v0_2(AppContext* app, json &j, json &objects);
 bool settings_read_v0_3(AppContext* app, json &j, json &objects);
 bool settings_read(AppContext* app, json &objects);
+void apply_work_area(AppContext* app);
+void move_overlay(AppContext* app, int direction);
 
 
 #define UPDATE_VIEW_CHANGED 1
@@ -126,6 +129,9 @@ struct AppContext
 
     // Animated GIF
     bool have_animations = false;
+
+    bool applying_work_area = false;
+    bool overlay_moved_by_os = false;
 };
 
 
@@ -498,6 +504,7 @@ public:
 
             gen.seed((unsigned)idle_ticks);
             surface = SDL_CreateSurface(wa_width, wa_height, SDL_PIXELFORMAT_RGBA8888);
+            if (!surface) return;
             SDL_ClearSurface(surface, 0, 0, 0, 0);
 
             pixel = SDL_MapSurfaceRGBA(
@@ -511,7 +518,8 @@ public:
 
             for (float c = c_min; c < c_max; c += line_spacing)
             {
-                int dash_offset = this->dashed ? dist(gen) % (dash_len + gap_len) : 0;
+                int period = dash_len + gap_len;
+                int dash_offset = (this->dashed && period > 0) ? dist(gen) % period : 0;
                 vector<SDL_Point> intersections;
 
                 if (sa != 0)
@@ -951,18 +959,29 @@ public:
     {
         if (!valid() || !renderer || renderer != this->renderer || !surface) return false;
 
-        auto pixels = (Uint32*)surface->pixels;
+        if (!SDL_LockSurface(surface)) return false;
+
         auto format_details = SDL_GetPixelFormatDetails(surface->format);
-        int totalPixels = surface->w * surface->h;
+        auto *pixels = (Uint8 *)surface->pixels;
 
-        for (int i = 0; i < totalPixels; ++i)
+        for (int y = 0; y < surface->h; ++y)
         {
-            Uint8 r, g, b, a;
-            SDL_GetRGBA(pixels[i], format_details, nullptr, &r, &g, &b, &a);
-
-            Uint32 px = SDL_MapRGBA(format_details, nullptr, GetRValue(color), GetGValue(color), GetBValue(color), a); // grayscale RGB from alpha
-            pixels[i] = px;
+            auto *row = (Uint32 *)(pixels + y * surface->pitch);
+            for (int x = 0; x < surface->w; ++x)
+            {
+                Uint8 r, g, b, a;
+                SDL_GetRGBA(row[x], format_details, nullptr, &r, &g, &b, &a);
+                row[x] = SDL_MapRGBA(
+                    format_details,
+                    nullptr,
+                    GetRValue(color),
+                    GetGValue(color),
+                    GetBValue(color),
+                    a);
+            }
         }
+
+        SDL_UnlockSurface(surface);
 
         SDL_Texture* new_texture = SDL_CreateTextureFromSurface(const_cast<SDL_Renderer*>(renderer), surface);
 
@@ -982,9 +1001,6 @@ class Image : public ScreenObject
 public:
     string name;
     string full_path;
-    float scale;
-    float rotate;
-    float alpha;
     bool flip_horizontal;
     const SDL_Renderer *renderer;
     SDL_Surface *surface;
@@ -1320,6 +1336,7 @@ public:
     SDL_Rect previous_frame_rect;
     vector<frame_info_t> frame_info;
     GifFileType *gif;
+    SDL_Surface *restore_buffer;
 
     AnimatedGif(
         float x, float y,
@@ -1332,7 +1349,8 @@ public:
         bool cache_frames,
         const SDL_Renderer *renderer)
     : Image(x, y, renderer),
-      gif((GifFileType*)nullptr)
+      gif(nullptr),
+      restore_buffer(nullptr)
     {
         full_path = (base_path / name).string();
         init(x, y, name, full_path, scale_by, rotate_by, flip_horizontal, alpha, cache_frames);
@@ -1340,7 +1358,8 @@ public:
 
     AnimatedGif(json &j, const SDL_Renderer *renderer)
     : Image(-1, -1, renderer),
-      gif((GifFileType*)nullptr)
+      gif(nullptr),
+      restore_buffer(nullptr)
     {
         try
         {
@@ -1366,6 +1385,8 @@ public:
     ~AnimatedGif() override
     {
         invalidate(true); // cached frames only; Image owns surface/texture
+        SDL_DestroySurface(restore_buffer);
+        restore_buffer = nullptr;
         if (gif)
         {
             DGifCloseFile(gif, nullptr);
@@ -1398,6 +1419,7 @@ protected:
         this->alpha = alpha;
         this->cache_frames = cache_frames;
         this->previous_frame_rect = {0, 0, 0, 0};
+        restore_buffer = nullptr;
 
         if (!renderer) return;
 
@@ -1410,47 +1432,56 @@ protected:
         {
             GraphicsControlBlock gcb;
 
-            DGifSlurp(gif);
-            frame_count = gif->ImageCount;
-            for (int i = 0; i < frame_count; i++)
+            if (DGifSlurp(gif) != GIF_OK || gif->ImageCount <= 0 || !gif->SavedImages ||
+                gif->SWidth <= 0 || gif->SHeight <= 0)
             {
-                frame_info_t info {
-                    .delay_ms = 100,
-                    .transparent_color_index = NO_TRANSPARENT_COLOR,
-                    .disposal_mode = DISPOSAL_UNSPECIFIED,
-                    .texture_outdated = true,
-                    .texture = (SDL_Texture *)nullptr
-                };
-
-                SavedImage *frame = &gif->SavedImages[i];
-                for (int j = 0; j < frame->ExtensionBlockCount; j++)
+                SDL_Log("Error decoding \"%s\"", name.c_str());
+                DGifCloseFile(gif, nullptr);
+                gif = nullptr;
+            }
+            else
+            {
+                frame_count = gif->ImageCount;
+                for (int i = 0; i < frame_count; i++)
                 {
-                    ExtensionBlock *ext = &frame->ExtensionBlocks[j];
-                    if (ext && ext->Function == GRAPHICS_EXT_FUNC_CODE)
+                    frame_info_t info {
+                        .delay_ms = 100,
+                        .transparent_color_index = NO_TRANSPARENT_COLOR,
+                        .disposal_mode = DISPOSAL_UNSPECIFIED,
+                        .texture_outdated = true,
+                        .texture = (SDL_Texture *)nullptr
+                    };
+
+                    SavedImage *frame = &gif->SavedImages[i];
+                    for (int j = 0; j < frame->ExtensionBlockCount; j++)
                     {
-                        if (GIF_OK == DGifExtensionToGCB(ext->ByteCount, ext->Bytes, &gcb))
+                        ExtensionBlock *ext = &frame->ExtensionBlocks[j];
+                        if (ext && ext->Function == GRAPHICS_EXT_FUNC_CODE)
                         {
-                            info.delay_ms = gcb.DelayTime * 10;
-                            info.transparent_color_index = gcb.TransparentColor;
-                            info.disposal_mode = gcb.DisposalMode;
-                            break;
+                            if (GIF_OK == DGifExtensionToGCB(ext->ByteCount, ext->Bytes, &gcb))
+                            {
+                                info.delay_ms = gcb.DelayTime * 10;
+                                info.transparent_color_index = gcb.TransparentColor;
+                                info.disposal_mode = gcb.DisposalMode;
+                                break;
+                            }
                         }
                     }
+
+                    frame_info.push_back(info);
                 }
 
-                frame_info.push_back(info);
+                surface = SDL_CreateSurface(gif->SWidth, gif->SHeight, SDL_PIXELFORMAT_RGBA8888);
+                if (surface)
+                {
+                    SDL_ClearSurface(surface, 0, 0, 0, 0);
+                }
+                render_frame(const_cast<SDL_Renderer*>(renderer));
+                extent.w = gif->SWidth;
+                extent.h = gif->SHeight;
+                extent.x = extent.w / 2;
+                extent.y = extent.h / 2;
             }
-
-            surface = SDL_CreateSurface(gif->SWidth, gif->SHeight, SDL_PIXELFORMAT_RGBA8888);
-            if (surface)
-            {
-                SDL_ClearSurface(surface, 0, 0, 0, 0);
-            }
-            render_frame(const_cast<SDL_Renderer*>(renderer));
-            extent.w = gif->SWidth;
-            extent.h = gif->SHeight;
-            extent.x = extent.w / 2;
-            extent.y = extent.h / 2;
         }
     }
 
@@ -1477,19 +1508,14 @@ public:
     [[nodiscard]]
     bool valid() const override
     {
-        return (bool)surface && !deleted;
+        return surface && !deleted && frame_count > 0 &&
+               current_frame >= 0 && current_frame < frame_count &&
+               current_frame < (int)frame_info.size();
     }
 
     bool handle_event(const SDL_Event* event, int &needs_update, AppContext *app) override
     {
-        bool result = valid() && Image::handle_event(event, needs_update, app);
-
-        if (needs_update == UPDATE_SETTINGS_CHANGED)
-        {
-            invalidate();
-        }
-
-        return result;
+        return valid() && Image::handle_event(event, needs_update, app);
     }
 
     void draw(const SDL_FPoint &pt, float alpha, const SDL_Renderer *renderer) const override
@@ -1523,12 +1549,11 @@ public:
         const ColorMapObject *color_map;
         const Uint8 *raster_bits;
         int bg_color;
-        frame_info_t *frame_info = &this->frame_info[current_frame];
         int transparent_color;
-        Uint32 *addr;
 
-        // If the GIF is not valid or the renderer is not available, do nothing.
         if (!valid() || !renderer) return;
+
+        frame_info_t *frame_info = &this->frame_info[current_frame];
 
         // If the texture for the current frame is already cached, just use it.
         if (!frame_info->texture_outdated)
@@ -1575,33 +1600,46 @@ public:
                 }
                 break;
             }
+            case DISPOSE_PREVIOUS:
+                if (restore_buffer)
+                {
+                    SDL_BlitSurface(restore_buffer, nullptr, surface, nullptr);
+                }
+                break;
             case DISPOSE_DO_NOT:
-                // Do nothing, the previous frame is kept.
                 break;
             case DISPOSAL_UNSPECIFIED:
-            default: // DISPOSE_NONE
-                // Do nothing, just overwrite the previous frame.
+            default:
                 break;
         }
 
-        // Get the dimensions and position of the current frame.
         left = frame->ImageDesc.Left;
         top = frame->ImageDesc.Top;
         width = frame->ImageDesc.Width;
         height = frame->ImageDesc.Height;
+        if (width <= 0 || height <= 0) return;
+
+        if (frame_info->disposal_mode == DISPOSE_PREVIOUS)
+        {
+            if (!restore_buffer)
+            {
+                restore_buffer = SDL_CreateSurface(surface->w, surface->h, surface->format);
+            }
+            if (restore_buffer)
+            {
+                SDL_BlitSurface(surface, nullptr, restore_buffer, nullptr);
+            }
+        }
 
         transparent_color = frame_info->transparent_color_index;
 
-        // Pre-calculate the palette colors for the current frame to optimize the rendering loop.
         vector<Uint32> palette_colors(color_map->ColorCount);
         const SDL_PixelFormatDetails* format_details = SDL_GetPixelFormatDetails(surface->format);
         for (int i = 0; i < color_map->ColorCount; i++)
         {
             if (i == transparent_color) {
-                // Set the transparent color to have an alpha of 0 (values of R, G, B don't matter, since alpha is zero).
                 palette_colors[i] = 0;
             } else {
-                // Set the other colors with an alpha of 255 (fully opaque).
                 palette_colors[i] = SDL_MapRGBA(
                         format_details,
                         nullptr,
@@ -1612,23 +1650,29 @@ public:
             }
         }
 
-        // Lock the surface to directly access the pixels.
+        vector<int> dest_rows;
+        gif_build_row_map(height, frame->ImageDesc.Interlace, dest_rows);
+
         SDL_LockSurface(surface);
-        // Iterate over the pixels of the current frame and update the surface.
         for (int i = 0; i < height; i++)
         {
-            addr = (Uint32*)(void*)((Uint8*)surface->pixels + (i + top) * surface->pitch) + left;
+            int y = top + dest_rows[i];
+            if (y < 0 || y >= surface->h) continue;
+
+            auto *row = (Uint32 *)((Uint8 *)surface->pixels + y * surface->pitch);
+            const Uint8 *src = raster_bits + (size_t)i * (size_t)width;
+
             for (int j = 0; j < width; j++)
             {
-                int color_index = *raster_bits++;
-                if (color_index < color_map->ColorCount)
-                {
-                    // Only draw the pixel if it is not transparent.
-                    Uint32 color = palette_colors[color_index];
-                    if (color) *addr = color;
-                }
+                int x = left + j;
+                if (x < 0 || x >= surface->w) continue;
 
-                addr++;
+                int color_index = src[j];
+                if (color_index >= 0 && color_index < color_map->ColorCount)
+                {
+                    Uint32 color = palette_colors[color_index];
+                    if (color) row[x] = color;
+                }
             }
         }
         SDL_UnlockSurface(surface);
@@ -1648,8 +1692,11 @@ public:
             frame_info->texture_outdated = false;
         }
 
-        // Store the rectangle of the current frame for the next iteration.
-        previous_frame_rect = {left, top, width, height};
+        int pl = SDL_max(0, left);
+        int pt = SDL_max(0, top);
+        int pr = SDL_min(surface->w, left + width);
+        int pb = SDL_min(surface->h, top + height);
+        previous_frame_rect = {pl, pt, SDL_max(0, pr - pl), SDL_max(0, pb - pt)};
         // Store the disposal method of the current frame for the next iteration.
         recent_disposal = frame_info->disposal_mode;
     }
@@ -2087,7 +2134,20 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event)
     {
         app->needs_redraw = true;
 
-        if (event->key.key == SDLK_LEFT)
+        SDL_Keymod mods = SDL_GetModState();
+        if ((event->key.key == SDLK_LEFT || event->key.key == SDLK_RIGHT) &&
+            (mods & SDL_KMOD_GUI) && (mods & SDL_KMOD_SHIFT))
+        {
+            if (app->overlay_moved_by_os)
+            {
+                app->overlay_moved_by_os = false;
+            }
+            else
+            {
+                move_overlay(app, event->key.key == SDLK_RIGHT ? 1 : -1);
+            }
+        }
+        else if (event->key.key == SDLK_LEFT)
         {
             app->alpha = SDL_max(0, app->alpha - 17.f / 255.f);
             app->is_virgin = false;
@@ -2131,6 +2191,30 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event* event)
                     event->drop.data,
                     app);
         }
+    }
+
+    else if (event->type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
+             event->type == SDL_EVENT_WINDOW_MOVED)
+    {
+        if (!app->applying_work_area && app->window)
+        {
+            SDL_DisplayID id = SDL_GetDisplayForWindow(app->window);
+            SDL_Rect bounds{};
+            if (id && SDL_GetDisplayUsableBounds(id, &bounds))
+            {
+                SDL_Rect expected = bounds;
+                if (app->crop_bottom > 0) expected.h -= app->crop_bottom;
+                if (expected.x != app->work_area.x || expected.y != app->work_area.y ||
+                    expected.w != app->work_area.w || expected.h != app->work_area.h)
+                {
+                    app->screen_rect = bounds;
+                    app->work_area = expected;
+                    apply_work_area(app);
+                    app->overlay_moved_by_os = true;
+                }
+            }
+        }
+        app->needs_redraw = true;
     }
 
     else if (event->type == SDL_EVENT_DROP_FILE)
@@ -2197,6 +2281,72 @@ void update_screen_metrics(AppContext* app)
 
     app->center_x = (float) app->work_area.x + (float) app->work_area.w / 2.f;
     app->center_y = (float) app->work_area.y + (float) app->work_area.h / 2.f;
+}
+
+
+void apply_work_area(AppContext* app)
+{
+    app->center_x = (float)app->work_area.x + (float)app->work_area.w / 2.f;
+    app->center_y = (float)app->work_area.y + (float)app->work_area.h / 2.f;
+
+    app->applying_work_area = true;
+    if (app->window)
+    {
+        SDL_SetWindowPosition(app->window, app->work_area.x, app->work_area.y);
+        SDL_SetWindowSize(app->window, app->work_area.w, app->work_area.h);
+    }
+    app->applying_work_area = false;
+
+    for (auto *obj : app->screen_objects)
+    {
+        if (auto *lines = dynamic_cast<LineObject *>(obj))
+        {
+            lines->work_area.w = app->work_area.w;
+            lines->work_area.h = app->work_area.h;
+        }
+    }
+
+    app->needs_redraw = true;
+}
+
+
+void move_overlay(AppContext* app, int direction)
+{
+    int count = 0;
+    SDL_DisplayID *ids = SDL_GetDisplays(&count);
+    if (!ids || count < 1)
+    {
+        SDL_free(ids);
+        return;
+    }
+
+    SDL_DisplayID current = app->window ? SDL_GetDisplayForWindow(app->window) : 0;
+    int idx = 0;
+    for (int i = 0; i < count; i++)
+    {
+        if (ids[i] == current)
+        {
+            idx = i;
+            break;
+        }
+    }
+    idx = (idx + direction) % count;
+    if (idx < 0) idx += count;
+
+    SDL_Rect bounds{};
+    if (SDL_GetDisplayUsableBounds(ids[idx], &bounds))
+    {
+        app->screen_rect = bounds;
+        app->work_area = bounds;
+        if (app->crop_bottom > 0)
+        {
+            app->work_area.h -= app->crop_bottom;
+        }
+        apply_work_area(app);
+        app->is_virgin = false;
+    }
+
+    SDL_free(ids);
 }
 
 
@@ -2340,26 +2490,15 @@ bool screen_objects_add_text(float x, float y, const char* text, AppContext *app
 bool screen_objects_add_image(float x, float y, const char *full_path_name, AppContext *app)
 {
     ScreenObject *obj = nullptr;
-    string buffer(full_path_name);
     path fullpath = full_path_name;
 
-    std::transform(
-            buffer.begin(),
-            buffer.end(),
-            buffer.begin(),
-            [](unsigned char c){ return std::tolower(c); });
-
-    if (buffer.ends_with(".jpg") ||
-        buffer.ends_with(".gif") ||
-        buffer.ends_with(".bmp") ||
-        buffer.ends_with(".png") ||
-        buffer.ends_with(".svg"))
+    if (path_has_image_extension(full_path_name))
     {
         SDL_PathInfo info;
 
         if (SDL_GetPathInfo(full_path_name, &info) && info.type == SDL_PATHTYPE_FILE)
         {
-            if (buffer.ends_with(".gif"))
+            if (path_has_gif_extension(full_path_name))
             {
                 obj = new AnimatedGif(
                         x,
@@ -2414,15 +2553,10 @@ bool screen_objects_add_image(float x, float y, const char *full_path_name, AppC
 
 void clipboard_insert(AppContext *app)
 {
-    if (SDL_HasClipboardText())
+    if (OpenClipboard(nullptr))
     {
-        char *clp_text = SDL_GetClipboardText();
+        bool pasted_files = false;
 
-        screen_objects_add_text(app->center_x, app->center_y, clp_text, app);
-        SDL_free(clp_text);
-    }
-    else if (OpenClipboard(nullptr))
-    {
         if (IsClipboardFormatAvailable(CF_HDROP))
         {
             HANDLE h_drop = GetClipboardData(CF_HDROP);
@@ -2435,6 +2569,7 @@ void clipboard_insert(AppContext *app)
                     char file_path[MAX_PATH];
                     if (DragQueryFile((HDROP)h_drop, i, file_path, MAX_PATH))
                     {
+                        pasted_files = true;
                         if (!screen_objects_add_image(app->center_x, app->center_y, file_path, app))
                         {
                             screen_objects_add_text(app->center_x, app->center_y, file_path, app);
@@ -2443,7 +2578,17 @@ void clipboard_insert(AppContext *app)
                 }
             }
         }
+
         CloseClipboard();
+        if (pasted_files) return;
+    }
+
+    if (SDL_HasClipboardText())
+    {
+        char *clp_text = SDL_GetClipboardText();
+
+        screen_objects_add_text(app->center_x, app->center_y, clp_text, app);
+        SDL_free(clp_text);
     }
 }
 
@@ -2481,79 +2626,18 @@ void draw_line_bresenham(
     // Return immediately if the surface or color is invalid.
     if (!surface || !color) return;
 
-    // Determine the direction of the line in x and y axes.
-    int sx = (dx >= 0) ? 1 : -1; // x-step: 1 for right, -1 for left
-    int sy = (dy >= 0) ? 1 : -1; // y-step: 1 for down, -1 for up
-
-    // Initialize error term for Bresenham's algorithm.
-    // This helps decide when to step in the y direction.
-    int err = dx - dy;
-
-    // Get bytes per pixel and pitch (row length in bytes) from the surface.
-    int bpp = 4; // Assuming RGBA8888 format (4 bytes per pixel)
+    int bpp = 4;
     int pitch = surface->pitch;
-
-    // Pointer to the current pixel address on the surface.
-    void *addr = nullptr;
-
-    // Loop counter to prevent infinite loops for very long lines or zero-length segments.
-    int n = 10000; // Max number of pixels to draw (safety limit)
-
-    // Current position in the dash/gap pattern.
     int i = dash_offset;
+    const int period = dash_len + gap_len;
 
-    // Take absolute values of dx and dy for the algorithm.
-    dx = SDL_abs(dx);
-    dy = SDL_abs(dy);
-
-    // Main loop for Bresenham's algorithm.
-    while (n--)
+    bresenham_visit(x1, y1, dx, dy, [&](int x, int y)
     {
-        int e2; // Error term multiplied by 2 for integer arithmetic
-
-        // Increment dash/gap counter.
         i++;
-
-        // Check if the current pixel is within the bounds of the surface.
-        if (y1 >= 0 && y1 < surface->h && x1 >= 0 && x1 < surface->w)
-        {
-            // If the address has not been initialized yet, calculate it.
-            if (!addr)
-            {
-                addr = (Uint8 *)surface->pixels + y1 * pitch + x1 * bpp;
-            }
-            // Check if the current segment should be a dash (not a gap).
-            // If gap_len is 0, it's a solid line, so always draw.
-            if (gap_len == 0 || i % (gap_len + dash_len) < dash_len)
-            {
-                // Copy the color data to the current pixel.
-                memcpy(addr, color, bpp);
-            }
-        }
-        else
-        {
-            // If we are outside the surface and have already drawn some pixels,
-            // we can stop drawing. This prevents drawing lines far off-screen.
-            if (addr) break;
-        }
-
-        // Calculate 2 * error for the next step.
-        e2 = 2 * err;
-
-        // Determine whether to step in x, y, or both.
-        if (e2 > -dy) // If error is still positive, step in x direction.
-        {
-            err -= dy; // Update error term.
-            x1 += sx;  // Move to the next pixel in x direction.
-            if (addr) addr = (Uint8 *)addr + sx * bpp; // Update pixel address if applicable.
-        }
-        if (e2 < dx) // If error is still negative, step in y direction.
-        {
-            err += dx; // Update error term.
-            y1 += sy;  // Move to the next pixel in y direction.
-            if (addr) addr = (Uint8 *)addr + sy * pitch; // Update pixel address if applicable.
-        }
-    }
+        if (y < 0 || y >= surface->h || x < 0 || x >= surface->w) return;
+        if (gap_len != 0 && period > 0 && i % period >= dash_len) return;
+        memcpy((Uint8 *)surface->pixels + y * pitch + x * bpp, color, bpp);
+    });
 }
 
 
@@ -2636,20 +2720,12 @@ bool color_from_key(int key, COLORREF &color)
 // Safe conversion from "#RRGGBB" string to COLORREF
 COLORREF hex_color_to_int(const string& hex)
 {
-    static const std::regex hexColorRegex("^#([0-9A-Fa-f]{6})$");
-
-    std::smatch match;
-    if (!std::regex_match(hex, match, hexColorRegex))
+    uint8_t r = 0, g = 0, b = 0;
+    if (!parse_hex_color(hex, r, g, b))
     {
         throw std::invalid_argument("Invalid hex color format: " + hex);
     }
-
-    // Parse each channel
-    Uint32 r = std::stoi(hex.substr(1, 2), nullptr, 16);
-    Uint32 g = std::stoi(hex.substr(3, 2), nullptr, 16);
-    Uint32 b = std::stoi(hex.substr(5, 2), nullptr, 16);
-
-    return RGB((BYTE)r, (BYTE)g, (BYTE)b);
+    return RGB(r, g, b);
 }
 
 
@@ -2678,24 +2754,27 @@ COLORREF get_color_value(const json& j, const string& key, COLORREF default_valu
 // Converts COLORREF to "#RRGGBB" string
 string int_to_hex_color(COLORREF color)
 {
-    char buf[8];
-    std::snprintf(
-        buf,
-        sizeof(buf),
-        "#%02X%02X%02X",
-        GetRValue(color),
-        GetGValue(color),
-        GetBValue(color));
-    return buf;
+    return format_hex_color(GetRValue(color), GetGValue(color), GetBValue(color));
+}
+
+
+string settings_filename()
+{
+    char username[257];
+    DWORD username_len = (DWORD)sizeof(username);
+    string filename;
+
+    if (GetUserNameA(username, &username_len))
+    {
+        filename = string(username) + "_";
+    }
+    filename += "dragon.settings";
+    return filename;
 }
 
 
 void settings_write(AppContext* app)
 {
-    char username[32];
-    DWORD username_len = 32;
-    string filename;
-
     if (app->is_virgin)
     {
         return;
@@ -2745,26 +2824,37 @@ void settings_write(AppContext* app)
     }
     j["objects"] = objects;
 
-    if (GetUserNameA(username, &username_len))
-    {
-        filename = string(username) + "_";
-    }
-    filename += "dragon.settings";
-
-    // Write JSON to a file
-    std::ofstream file(app->base_path / filename);
+    const path settings_path = app->base_path / settings_filename();
+    std::ofstream file(settings_path);
 
     if (file.is_open())
     {
         file << j.dump(4);
+        const bool ok = static_cast<bool>(file);
         file.close();
-        SDL_Log("Settings written.");
+        if (ok)
+        {
+            SDL_Log("Settings written.");
+        }
+        else
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed writing settings to %s", settings_path.string().c_str());
+        }
+    }
+    else
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Could not write settings to %s", settings_path.string().c_str());
     }
 }
 
 
 bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 {
+    if (!settings_is_v0_2_document(j))
+    {
+        return false;
+    }
+
     app->crop_bottom = 0;  // j.value("task_bar_height", app->crop_bottom);
     app->alpha = j.value("alpha", app->alpha * 255.f) / 255.f;
     app->hidden = (bool)j.value("hidden", 0);
@@ -2772,7 +2862,7 @@ bool settings_read_v0_2(AppContext* app, json &j, json &objects)
     app->logo_file_name = j.value("logo_filename", app->logo_file_name);
     app->logo_scale = j.value("logo_scale", app->logo_scale);
     app->text_content = j.value("text_content", app->text_content);
-    app->text_file_name = j["text_file_name"];
+    app->text_file_name = j.value("text_file_name", app->text_file_name);
     app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
     app->text_font_name = j.value("text_font_name", app->text_font_name);
     app->text_font_size = j.value("text_font_size", app->text_font_size);
@@ -2820,17 +2910,20 @@ bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 
 bool settings_read_v0_3(AppContext* app, json &j, json &objects)
 {
-	if (!j.contains("info") || !j["info"].contains("version") || j["info"]["version"] != "0.3")
+	if (!settings_is_v0_3_document(j))
 	{
 		return false;
 	}
 
-	app->screen_rect_init = SDL_Rect(
-		j["screen_rect_init"][0],
-		j["screen_rect_init"][1],
-		j["screen_rect_init"][2],
-		j["screen_rect_init"][3]
-	);
+	if (j.contains("screen_rect_init") && j["screen_rect_init"].is_array() && j["screen_rect_init"].size() >= 4)
+	{
+		app->screen_rect_init = SDL_Rect(
+			j["screen_rect_init"][0],
+			j["screen_rect_init"][1],
+			j["screen_rect_init"][2],
+			j["screen_rect_init"][3]
+		);
+	}
 	app->crop_bottom = j.value("crop_bottom", app->crop_bottom);
 	app->alpha = j.value("alpha", app->alpha * 255.f) / 255.f;
 	app->hidden = j.value("hidden", false);
@@ -2865,22 +2958,20 @@ bool settings_read_v0_3(AppContext* app, json &j, json &objects)
 
 bool settings_read_v0_4(AppContext* app, json &j, json &objects)
 {
-    if (!j.contains("info") || !j["info"].contains("version"))
-    {
-        return false;
-    }
-    const string ver = j["info"]["version"];
-    if (ver != "0.4" && ver != "0.5")
+    if (!settings_is_v0_4_or_0_5_document(j))
     {
         return false;
     }
 
-    app->screen_rect_init = SDL_Rect(
-        j["screen_rect_init"][0],
-        j["screen_rect_init"][1],
-        j["screen_rect_init"][2],
-        j["screen_rect_init"][3]
-    );
+    if (j.contains("screen_rect_init") && j["screen_rect_init"].is_array() && j["screen_rect_init"].size() >= 4)
+    {
+        app->screen_rect_init = SDL_Rect(
+            j["screen_rect_init"][0],
+            j["screen_rect_init"][1],
+            j["screen_rect_init"][2],
+            j["screen_rect_init"][3]
+        );
+    }
     app->crop_bottom = j.value("crop_bottom", app->crop_bottom);
     app->alpha = j.value("alpha", app->alpha);
     app->hidden = j.value("hidden", false);
@@ -2890,7 +2981,7 @@ bool settings_read_v0_4(AppContext* app, json &j, json &objects)
     app->logo_scale = j.value("logo_scale", app->logo_scale);
     app->logo_alpha = j.value("logo_alpha", app->logo_alpha);
     app->text_content = j.value("text_content", app->text_content);
-    app->text_file_name = j["text_file_name"];
+    app->text_file_name = j.value("text_file_name", app->text_file_name);
     app->text_font_color = get_color_value(j, "text_font_color", app->text_font_color);
     app->text_font_name = j.value("text_font_name", app->text_font_name);
     app->text_font_size = j.value("text_font_size", app->text_font_size);
@@ -2906,19 +2997,8 @@ bool settings_read_v0_4(AppContext* app, json &j, json &objects)
 
 bool settings_read(AppContext* app, json &objects)
 {
-    char username[32];
-    DWORD username_len = 32;
-    string filename;
     json j;
-
-    if (GetUserNameA(username, &username_len))
-    {
-        filename = string(username) + "_";
-    }
-    filename += "dragon.settings";
-
-    // Write JSON to a file
-    std::ifstream file(app->base_path / filename);
+    std::ifstream file(app->base_path / settings_filename());
 
     if (file.good())
     {

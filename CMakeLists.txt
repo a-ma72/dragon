@@ -63,17 +63,33 @@ add_subdirectory(src/external/giflib-5.2.2 EXCLUDE_FROM_ALL)
 add_subdirectory(src/external/json)
 
 
+add_library(dragon_util STATIC
+        src/dragon_util.cpp
+)
+target_include_directories(dragon_util PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(dragon_util PUBLIC json)
+
 add_executable(dragon WIN32
         src/main.cpp
         src/dragon.rc
 )
 target_link_libraries(dragon
+        dragon_util
         SDL3::SDL3-static
         SDL3_image::SDL3_image
         SDL3_ttf::SDL3_ttf
         giflib
         json
 )
+
+add_executable(dragon_tests
+        tests/test_dragon.cpp
+)
+target_link_libraries(dragon_tests PRIVATE dragon_util)
+enable_testing()
+add_test(NAME dragon_tests COMMAND dragon_tests)
 target_link_options(dragon PRIVATE
         /VERBOSE:LIB /MAP /MAPINFO:EXPORTS
         /GL /LTCG
