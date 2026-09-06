@@ -1581,11 +1581,7 @@ public:
             case DISPOSE_BACKGROUND:
             {
                 // Clear the area of the previous frame to the background color.
-                if (bg_color == NO_TRANSPARENT_COLOR || bg_color < color_map->ColorCount)
-                {
-                    SDL_FillSurfaceRect(surface, &previous_frame_rect, 0);
-                }
-                else
+                if (bg_color >= 0 && bg_color < color_map->ColorCount)
                 {
                     GifColorType *color = &color_map->Colors[bg_color];
                     const SDL_PixelFormatDetails* format_details = SDL_GetPixelFormatDetails(surface->format);
@@ -1597,6 +1593,10 @@ public:
                             color->Blue,
                             255);
                     SDL_FillSurfaceRect(surface, &previous_frame_rect, mapped_color);
+                }
+                else
+                {
+                    SDL_FillSurfaceRect(surface, &previous_frame_rect, 0);
                 }
                 break;
             }
@@ -1943,7 +1943,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         draw(app);
     }
 
-    auto *line_object = dynamic_cast<LineObject *>(app->screen_objects[0]);
+    LineObject *line_object = nullptr;
+    if (!app->screen_objects.empty())
+    {
+        line_object = dynamic_cast<LineObject *>(app->screen_objects[0]);
+    }
     if (line_object && line_object->dashed && line_object->dashed_gap > 0 && line_object->width > 0 && !app->hidden)
     {
         Sint64 delay = (Sint64)(ticks - app->idle_ticks);
@@ -1996,6 +2000,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         // SDL_Log("timeout: %i", timeout);
     }
 
+    app->overlay_moved_by_os = false;
     return app->app_quit;
 }
 
@@ -2720,12 +2725,12 @@ bool color_from_key(int key, COLORREF &color)
 // Safe conversion from "#RRGGBB" string to COLORREF
 COLORREF hex_color_to_int(const string& hex)
 {
-    uint8_t r = 0, g = 0, b = 0;
-    if (!parse_hex_color(hex, r, g, b))
+    uint32_t color = 0;
+    if (!hex_to_colorref(hex, color))
     {
         throw std::invalid_argument("Invalid hex color format: " + hex);
     }
-    return RGB(r, g, b);
+    return (COLORREF)color;
 }
 
 
@@ -2754,7 +2759,7 @@ COLORREF get_color_value(const json& j, const string& key, COLORREF default_valu
 // Converts COLORREF to "#RRGGBB" string
 string int_to_hex_color(COLORREF color)
 {
-    return format_hex_color(GetRValue(color), GetGValue(color), GetBValue(color));
+    return colorref_to_hex((uint32_t)color);
 }
 
 

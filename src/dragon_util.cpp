@@ -28,9 +28,40 @@ std::string format_hex_color(uint8_t r, uint8_t g, uint8_t b)
     return buf;
 }
 
+uint32_t pack_colorref(uint8_t r, uint8_t g, uint8_t b)
+{
+    return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16);
+}
+
+void unpack_colorref(uint32_t color, uint8_t &r, uint8_t &g, uint8_t &b)
+{
+    r = (uint8_t)(color & 0xFFu);
+    g = (uint8_t)((color >> 8) & 0xFFu);
+    b = (uint8_t)((color >> 16) & 0xFFu);
+}
+
+bool hex_to_colorref(std::string_view hex, uint32_t &color)
+{
+    uint8_t r = 0, g = 0, b = 0;
+    if (!parse_hex_color(hex, r, g, b))
+    {
+        return false;
+    }
+    color = pack_colorref(r, g, b);
+    return true;
+}
+
+std::string colorref_to_hex(uint32_t color)
+{
+    uint8_t r = 0, g = 0, b = 0;
+    unpack_colorref(color, r, g, b);
+    return format_hex_color(r, g, b);
+}
+
 void gif_build_row_map(int height, bool interlace, std::vector<int> &dest_rows)
 {
-    dest_rows.resize(height > 0 ? height : 0);
+    if (height < 0) height = 0;
+    dest_rows.resize((size_t)height);
     for (int i = 0; i < height; i++)
     {
         dest_rows[i] = i;

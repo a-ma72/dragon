@@ -36,6 +36,23 @@ static void test_hex_color_round_trip()
     EXPECT(!parse_hex_color("FF0000", r, g, b));
     EXPECT(!parse_hex_color("#FFF", r, g, b));
     EXPECT(!parse_hex_color("#GG0000", r, g, b));
+
+    uint32_t color = 0;
+    EXPECT(hex_to_colorref("#FF0000", color));
+    EXPECT((color & 0xFFu) == 255);
+    EXPECT(((color >> 8) & 0xFFu) == 0);
+    EXPECT(((color >> 16) & 0xFFu) == 0);
+    EXPECT(colorref_to_hex(color) == "#FF0000");
+
+    EXPECT(hex_to_colorref("#0000FF", color));
+    EXPECT((color & 0xFFu) == 0);
+    EXPECT(((color >> 16) & 0xFFu) == 255);
+    EXPECT(colorref_to_hex(color) == "#0000FF");
+
+    EXPECT(hex_to_colorref("#7092BE", color));
+    EXPECT(colorref_to_hex(color) == "#7092BE");
+    EXPECT(colorref_to_hex(pack_colorref(255, 0, 0)) == "#FF0000");
+    EXPECT(!hex_to_colorref("#GG0000", color));
 }
 
 static void test_bresenham()
@@ -91,6 +108,19 @@ static void test_gif_row_map()
     std::vector<int> empty;
     gif_build_row_map(0, true, empty);
     EXPECT(empty.empty());
+
+    std::vector<int> odd;
+    gif_build_row_map(5, true, odd);
+    EXPECT(odd.size() == 5);
+    const int expected_odd[5] = {0, 4, 2, 1, 3};
+    for (int i = 0; i < 5; i++)
+    {
+        EXPECT(odd[i] == expected_odd[i]);
+    }
+
+    std::vector<int> negative;
+    gif_build_row_map(-3, true, negative);
+    EXPECT(negative.empty());
 }
 
 static void test_image_extensions()

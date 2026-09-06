@@ -1,5 +1,6 @@
 #pragma once
 
+#include <climits>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -9,6 +10,12 @@
 
 bool parse_hex_color(std::string_view hex, uint8_t &r, uint8_t &g, uint8_t &b);
 std::string format_hex_color(uint8_t r, uint8_t g, uint8_t b);
+
+// Windows COLORREF layout: 0x00BBGGRR
+uint32_t pack_colorref(uint8_t r, uint8_t g, uint8_t b);
+void unpack_colorref(uint32_t color, uint8_t &r, uint8_t &g, uint8_t &b);
+bool hex_to_colorref(std::string_view hex, uint32_t &color);
+std::string colorref_to_hex(uint32_t color);
 
 void gif_build_row_map(int height, bool interlace, std::vector<int> &dest_rows);
 
@@ -24,8 +31,8 @@ void bresenham_visit(int x1, int y1, int dx, int dy, Fn &&fn)
 {
     const int sx = (dx >= 0) ? 1 : -1;
     const int sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx;
-    dy = dy >= 0 ? dy : -dy;
+    dx = dx >= 0 ? dx : (dx == INT_MIN ? INT_MAX : -dx);
+    dy = dy >= 0 ? dy : (dy == INT_MIN ? INT_MAX : -dy);
     int err = dx - dy;
     int n = (dx > dy ? dx : dy) + 1;
 
