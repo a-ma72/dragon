@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
-#include <string_view>
 #include <fstream>
 
 #define SDL_MAIN_USE_CALLBACKS
@@ -17,8 +16,6 @@
 
 #include <algorithm>
 #include <random>
-#include <regex>
-#include <limits>
 #include <windows.h>
 #include "json.hpp"
 #include "gif_lib.h"
@@ -855,7 +852,7 @@ public:
 
         else if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN)
         {
-            SDL_FPoint pt(event->motion.x, event->motion.y);
+            SDL_FPoint pt(event->button.x, event->button.y);
 
             if (hit_test(pt))
             {
@@ -1223,7 +1220,7 @@ public:
 
         else if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN)
         {
-            SDL_FPoint pt(event->motion.x, event->motion.y);
+            SDL_FPoint pt(event->button.x, event->button.y);
 
             if (hit_test(pt))
             {
@@ -1460,7 +1457,7 @@ protected:
                         {
                             if (GIF_OK == DGifExtensionToGCB(ext->ByteCount, ext->Bytes, &gcb))
                             {
-                                info.delay_ms = gcb.DelayTime * 10;
+                                info.delay_ms = gif_frame_delay_ms(gcb.DelayTime);
                                 info.transparent_color_index = gcb.TransparentColor;
                                 info.disposal_mode = gcb.DisposalMode;
                                 break;
@@ -2383,7 +2380,7 @@ void init_screen_objects(AppContext* app, json &objects) {
         {
             if (object.contains("image_full_path"))
             {
-                if (string(object["image_full_path"]).ends_with(".gif"))
+                if (path_has_gif_extension(object.value("image_full_path", string{})))
                 {
                     object["type"] = "AnimatedGif";
                 }
@@ -2447,11 +2444,24 @@ void init_screen_objects(AppContext* app, json &objects) {
                 obj = new AnimatedGif(
                         object,
                         app->renderer);
-                app->have_animations = true;
             }
             // (Silently ignore unknown object types)
 
-            if (obj) app->screen_objects.push_back(obj);
+            if (obj)
+            {
+                if (obj->valid())
+                {
+                    if (strcmp(obj->type_name(), "AnimatedGif") == 0)
+                    {
+                        app->have_animations = true;
+                    }
+                    app->screen_objects.push_back(obj);
+                }
+                else
+                {
+                    delete obj;
+                }
+            }
         }
     }
 }
@@ -2483,6 +2493,12 @@ bool screen_objects_add_text(float x, float y, const char* text, AppContext *app
         0.f,
         1.f,
         app->renderer);
+
+    if (!obj->valid())
+    {
+        delete obj;
+        return false;
+    }
 
     app->screen_objects.push_back(obj);
     app->is_virgin = false;
@@ -2853,9 +2869,21 @@ void settings_write(AppContext* app)
 }
 
 
+static string settings_file_version(const json &j)
+{
+    if (!j.contains("info") || !j["info"].contains("version") || !j["info"]["version"].is_string())
+    {
+        return {};
+    }
+    return j["info"]["version"].get<string>();
+}
+
+
 bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 {
-    if (!settings_is_v0_2_document(j))
+    const bool has_legacy_shape =
+        j.contains("textPos") || j.contains("logoPos") || j.contains("logo_filename");
+    if (!settings_is_v0_2(settings_file_version(j), has_legacy_shape))
     {
         return false;
     }
@@ -2915,7 +2943,7 @@ bool settings_read_v0_2(AppContext* app, json &j, json &objects)
 
 bool settings_read_v0_3(AppContext* app, json &j, json &objects)
 {
-	if (!settings_is_v0_3_document(j))
+	if (!settings_is_v0_3(settings_file_version(j)))
 	{
 		return false;
 	}
@@ -2963,7 +2991,7 @@ bool settings_read_v0_3(AppContext* app, json &j, json &objects)
 
 bool settings_read_v0_4(AppContext* app, json &j, json &objects)
 {
-    if (!settings_is_v0_4_or_0_5_document(j))
+    if (!settings_is_v0_4_or_0_5(settings_file_version(j)))
     {
         return false;
     }

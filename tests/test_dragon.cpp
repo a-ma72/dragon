@@ -5,8 +5,6 @@
 #include <utility>
 #include <vector>
 
-using nlohmann::json;
-
 static int g_failed = 0;
 
 #define EXPECT(cond) \
@@ -123,6 +121,14 @@ static void test_gif_row_map()
     EXPECT(negative.empty());
 }
 
+static void test_gif_frame_delay()
+{
+    EXPECT(gif_frame_delay_ms(0) == 100);
+    EXPECT(gif_frame_delay_ms(1) == 100);
+    EXPECT(gif_frame_delay_ms(2) == 20);
+    EXPECT(gif_frame_delay_ms(10) == 100);
+}
+
 static void test_image_extensions()
 {
     EXPECT(path_has_gif_extension("anim.GIF"));
@@ -136,19 +142,18 @@ static void test_image_extensions()
 
 static void test_settings_version_dispatch()
 {
-    EXPECT(settings_is_v0_4_or_0_5_document(json{{"info", {{"version", "0.5"}}}}));
-    EXPECT(settings_is_v0_4_or_0_5_document(json{{"info", {{"version", "0.4"}}}}));
-    EXPECT(!settings_is_v0_4_or_0_5_document(json{{"info", {{"version", "0.3"}}}}));
+    EXPECT(settings_is_v0_4_or_0_5("0.5"));
+    EXPECT(settings_is_v0_4_or_0_5("0.4"));
+    EXPECT(!settings_is_v0_4_or_0_5("0.3"));
 
-    EXPECT(settings_is_v0_3_document(json{{"info", {{"version", "0.3"}}}}));
-    EXPECT(!settings_is_v0_3_document(json{{"info", {{"version", "0.5"}}}}));
+    EXPECT(settings_is_v0_3("0.3"));
+    EXPECT(!settings_is_v0_3("0.5"));
 
-    EXPECT(settings_is_v0_2_document(json{{"info", {{"version", "0.2"}}}}));
-    EXPECT(settings_is_v0_2_document(json{{"textPos", {10, 20}}}));
-    EXPECT(settings_is_v0_2_document(json{{"logo_filename", "dragon.png"}}));
-    EXPECT(!settings_is_v0_2_document(json{{"info", {{"version", "0.6"}}}}));
-    EXPECT(!settings_is_v0_2_document(json{{"alpha", 0.5}}));
-    EXPECT(!settings_is_v0_2_document(json::object()));
+    EXPECT(settings_is_v0_2("0.2", false));
+    EXPECT(settings_is_v0_2("", true));
+    EXPECT(!settings_is_v0_2("0.6", false));
+    EXPECT(!settings_is_v0_2("0.6", true));
+    EXPECT(!settings_is_v0_2("", false));
 }
 
 int main()
@@ -156,6 +161,7 @@ int main()
     test_hex_color_round_trip();
     test_bresenham();
     test_gif_row_map();
+    test_gif_frame_delay();
     test_image_extensions();
     test_settings_version_dispatch();
 

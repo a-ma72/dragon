@@ -93,6 +93,12 @@ static std::string lower_copy(std::string_view path)
     return buffer;
 }
 
+int gif_frame_delay_ms(int delay_cs)
+{
+    const int ms = delay_cs * 10;
+    return (ms < 20) ? 100 : ms;
+}
+
 bool path_has_gif_extension(std::string_view path)
 {
     return lower_copy(path).ends_with(".gif");
@@ -112,32 +118,21 @@ bool path_has_image_extension(std::string_view path)
            buffer.ends_with(".tiff");
 }
 
-static std::string info_version(const nlohmann::json &j)
+bool settings_is_v0_2(std::string_view version, bool has_legacy_shape)
 {
-    if (!j.contains("info") || !j["info"].contains("version") || !j["info"]["version"].is_string())
+    if (!version.empty())
     {
-        return {};
+        return version == "0.2";
     }
-    return j["info"]["version"].get<std::string>();
+    return has_legacy_shape;
 }
 
-bool settings_is_v0_2_document(const nlohmann::json &j)
+bool settings_is_v0_3(std::string_view version)
 {
-    const std::string ver = info_version(j);
-    if (!ver.empty())
-    {
-        return ver == "0.2";
-    }
-    return j.contains("textPos") || j.contains("logoPos") || j.contains("logo_filename");
+    return version == "0.3";
 }
 
-bool settings_is_v0_3_document(const nlohmann::json &j)
+bool settings_is_v0_4_or_0_5(std::string_view version)
 {
-    return info_version(j) == "0.3";
-}
-
-bool settings_is_v0_4_or_0_5_document(const nlohmann::json &j)
-{
-    const std::string ver = info_version(j);
-    return ver == "0.4" || ver == "0.5";
+    return version == "0.4" || version == "0.5";
 }

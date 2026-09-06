@@ -6,8 +6,6 @@
 #include <string_view>
 #include <vector>
 
-#include "json.hpp"
-
 bool parse_hex_color(std::string_view hex, uint8_t &r, uint8_t &g, uint8_t &b);
 std::string format_hex_color(uint8_t r, uint8_t g, uint8_t b);
 
@@ -22,9 +20,11 @@ void gif_build_row_map(int height, bool interlace, std::vector<int> &dest_rows);
 bool path_has_gif_extension(std::string_view path);
 bool path_has_image_extension(std::string_view path);
 
-bool settings_is_v0_2_document(const nlohmann::json &j);
-bool settings_is_v0_3_document(const nlohmann::json &j);
-bool settings_is_v0_4_or_0_5_document(const nlohmann::json &j);
+int gif_frame_delay_ms(int delay_cs);
+
+bool settings_is_v0_2(std::string_view version, bool has_legacy_shape);
+bool settings_is_v0_3(std::string_view version);
+bool settings_is_v0_4_or_0_5(std::string_view version);
 
 template <typename Fn>
 void bresenham_visit(int x1, int y1, int dx, int dy, Fn &&fn)

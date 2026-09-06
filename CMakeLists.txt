@@ -69,7 +69,6 @@ add_library(dragon_util STATIC
 target_include_directories(dragon_util PUBLIC
         ${CMAKE_SOURCE_DIR}/src
 )
-target_link_libraries(dragon_util PUBLIC json)
 
 add_executable(dragon WIN32
         src/main.cpp
@@ -90,18 +89,20 @@ add_executable(dragon_tests
 target_link_libraries(dragon_tests PRIVATE dragon_util)
 enable_testing()
 add_test(NAME dragon_tests COMMAND dragon_tests)
-target_link_options(dragon PRIVATE
-        /VERBOSE:LIB /MAP /MAPINFO:EXPORTS
-        /GL /LTCG
-        /O1
-)
+if (MSVC)
+    target_link_options(dragon PRIVATE
+            /VERBOSE:LIB /MAP /MAPINFO:EXPORTS
+            /GL /LTCG
+            /O1
+    )
+endif()
 
 install(TARGETS dragon DESTINATION .)
 
 install(FILES
     ${CMAKE_SOURCE_DIR}/src/logos/dragon.png
     ${CMAKE_SOURCE_DIR}/src/fonts/Freeman-Regular.TTF
-    ${CMAKE_SOURCE_DIR}/README.md
+    ${CMAKE_SOURCE_DIR}/readme.md
     ${CMAKE_SOURCE_DIR}/app.png
     # C:/Windows/Fonts/ARIALNB.TTF
     DESTINATION .
