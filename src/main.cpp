@@ -1626,7 +1626,6 @@ public:
         int left, top, width, height;
         const ColorMapObject *color_map;
         const Uint8 *raster_bits;
-        int bg_color;
         int transparent_color;
 
         if (!surface || deleted || frame_count <= 0 || !renderer) return;
@@ -1649,7 +1648,6 @@ public:
         // Prepare canvas for the current frame
         if (!gif || !gif->SavedImages) return;
         frame = &gif->SavedImages[current_frame];
-        bg_color = gif->SBackGroundColor;
         raster_bits = frame->RasterBits;
         if (!raster_bits) return;
         color_map = frame->ImageDesc.ColorMap ? frame->ImageDesc.ColorMap : gif->SColorMap;
@@ -1659,28 +1657,11 @@ public:
         switch (recent_disposal)
         {
             case DISPOSE_BACKGROUND:
-            {
-                // Logical-screen background index is defined against the global color table
-                const ColorMapObject *bg_map = gif->SColorMap;
-                if (bg_map && bg_color >= 0 && bg_color < bg_map->ColorCount)
-                {
-                    GifColorType *color = &bg_map->Colors[bg_color];
-                    const SDL_PixelFormatDetails* format_details = SDL_GetPixelFormatDetails(surface->format);
-                    Uint32 mapped_color = SDL_MapRGBA(
-                            format_details,
-                            nullptr,
-                            color->Red,
-                            color->Green,
-                            color->Blue,
-                            255);
-                    SDL_FillSurfaceRect(surface, &previous_frame_rect, mapped_color);
-                }
-                else
-                {
-                    SDL_FillSurfaceRect(surface, &previous_frame_rect, 0);
-                }
+                // Restore the previous frame rect to transparent. GIF "background"
+                // is the canvas under the animation; filling with the screen
+                // descriptor color at alpha 255 made every later frame opaque.
+                SDL_FillSurfaceRect(surface, &previous_frame_rect, 0);
                 break;
-            }
             case DISPOSE_PREVIOUS:
                 if (restore_buffer)
                 {
