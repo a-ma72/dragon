@@ -1537,6 +1537,16 @@ protected:
                     SDL_ClearSurface(surface, 0, 0, 0, 0);
                 }
                 render_frame(const_cast<SDL_Renderer*>(renderer));
+                if (cache_frames && frame_count > 1 && renderer)
+                {
+                    for (int i = 1; i < frame_count; i++)
+                    {
+                        current_frame = i;
+                        render_frame(const_cast<SDL_Renderer*>(renderer));
+                    }
+                    current_frame = 0;
+                    render_frame(const_cast<SDL_Renderer*>(renderer));
+                }
                 extent.w = gif->SWidth;
                 extent.h = gif->SHeight;
                 extent.x = extent.w / 2;
@@ -1782,6 +1792,27 @@ public:
         previous_frame_rect = {pl, pt, SDL_max(0, pr - pl), SDL_max(0, pb - pt)};
         // Store the disposal method of the current frame for the next iteration.
         recent_disposal = frame_info->disposal_mode;
+    }
+
+    // Advance to the next frame. When allow_decode is false (drag path), only
+    // already-cached GPU textures are used so compositing cannot stall the mouse.
+    bool advance_frame(const SDL_Renderer *renderer, bool allow_decode)
+    {
+        if (frame_count <= 0 || frame_info.empty() || !renderer) return false;
+
+        const int next = (current_frame + 1) % frame_count;
+        if (!allow_decode)
+        {
+            if (next < 0 || next >= (int)frame_info.size() ||
+                frame_info[next].texture_outdated || !frame_info[next].texture)
+            {
+                return false;
+            }
+        }
+
+        current_frame = next;
+        render_frame(renderer);
+        return texture != nullptr;
     }
 
     void invalidate(bool remove = false)
@@ -2035,14 +2066,18 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     auto* app = (AppContext*)appstate;
     int timeout = -1;
     Uint64 ticks = SDL_GetTicks();
+    const bool dragging = app->mouse_capture != nullptr;
 
     if (app->app_quit != SDL_APP_CONTINUE) return app->app_quit;
 
     purge_deleted_screen_objects(app);
 
-    if (app->needs_redraw)
+    // VSync during drag makes the object trail the cursor by a display refresh.
+    static bool vsync_off_for_drag = false;
+    if (dragging != vsync_off_for_drag)
     {
-        draw(app);
+        SDL_SetRenderVSync(app->renderer, dragging ? 0 : SDL_RENDERER_VSYNC_ADAPTIVE);
+        vsync_off_for_drag = dragging;
     }
 
     LineObject *line_object = nullptr;
@@ -2079,10 +2114,16 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                 const Sint64 needed = (Sint64)gif->frame_info[gif->current_frame].delay_ms;
                 if (elapsed >= needed)
                 {
-                    gif->current_frame = (gif->current_frame + 1) % gif->frame_count;
-                    gif->render_frame(app->renderer);
-                    gif->latest_ticks = ticks;
-                    app->needs_redraw = true;
+                    // Decode/upload stalls dragging; cached frames are a texture swap.
+                    if (gif->advance_frame(app->renderer, !dragging))
+                    {
+                        gif->latest_ticks = ticks;
+                        app->needs_redraw = true;
+                    }
+                    else if (dragging)
+                    {
+                        gif->latest_ticks = ticks;
+                    }
                 }
                 else
                 {
@@ -2115,7 +2156,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         }
     }
 
-    if (!app->needs_redraw)
+    if (app->needs_redraw)
+    {
+        draw(app);
+    }
+    else
     {
         // Wait for next event with timeout (timeout==-1 means "no timeout")
         SDL_WaitEventTimeout(nullptr, timeout);
